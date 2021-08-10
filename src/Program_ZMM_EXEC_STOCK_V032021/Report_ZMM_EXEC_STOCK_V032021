@@ -1,0 +1,66 @@
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+* RESPONSIBLE :
+* AUTHOR      :
+* DATE        :
+*----------------------------------------------------------------------*
+* TITLE       :
+* DESCRIPTION :  <описание>                                            *
+*----------------------------------------------------------------------*
+* FUNCTIONAL AREA    : <функц.обл. из специф.>                         *
+* TASK SPECIFICATION : <имя файла>                                     *
+*----------------------------------------------------------------------*
+REPORT  zmm_exec_stock_v032021 MESSAGE-ID zmm2 LINE-SIZE 256.
+
+INCLUDE zmm_exec_stock_v032021_top.
+INCLUDE zmm_exec_stock_v032021_doc. " История изменений
+INCLUDE zmm_exec_stock_v032021_ssc.
+
+INCLUDE zvvv_messages   ##INCL_OK.
+INCLUDE zbc_incl_macro  ##INCL_OK.
+
+
+INCLUDE:
+  zmm_uso_dms_aws_cls01        ##INCL_OK,
+  zmm_exec_stock_v032021_cl01 .
+
+INCLUDE zmm_exec_stock_v032021_c01.
+INCLUDE zmm_exec_stock_v032021_f01.
+INCLUDE zmm_exec_stock_v032021_f02.
+
+INCLUDE zmm_exec_stock_v032021_cl99 . " Test
+
+*---------------------------------------------------------------------*
+INITIALIZATION.
+*---------------------------------------------------------------------*
+  PERFORM initialization.
+
+*---------------------------------------------------------------------*
+AT SELECTION-SCREEN OUTPUT.
+*---------------------------------------------------------------------*
+  PERFORM at_selection_screen_output .
+
+*---------------------------------------------------------------------*
+AT SELECTION-SCREEN .
+*---------------------------------------------------------------------*
+  PERFORM at_selection_screen .
+
+*---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON EXIT-COMMAND.
+*---------------------------------------------------------------------*
+  FREE MEMORY ID 'ZZC16N_STRALW'.
+
+*---------------------------------------------------------------------*
+START-OF-SELECTION.
+*---------------------------------------------------------------------*
+  TRY .
+      PERFORM start_of_selection.
+    CATCH zcx_acc16_write_off INTO gx_err.
+      MESSAGE gx_err TYPE 'S' DISPLAY LIKE 'E'.
+  ENDTRY.
+
+*---------------------------------------------------------------------*
+END-OF-SELECTION.
+*---------------------------------------------------------------------*
+  PERFORM end_of_selection.
