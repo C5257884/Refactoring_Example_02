@@ -1,0 +1,142 @@
+*&---------------------------------------------------------------------*
+*&      Form  GTD_SPLITTING
+*&---------------------------------------------------------------------*
+*       invoice item splitting by GTD
+*----------------------------------------------------------------------*
+  FORM gtd_splitting USING    i_orig_inv TYPE vbeln_vf
+                              i_orig_inv_pos TYPE vbrp-posnr
+                     CHANGING wa_invoice LIKE LINE OF it_invoice.
+
+    CONSTANTS lv_imcd  TYPE rs38l_fnam VALUE 'J_3RF_GET_IMCD_INV_A'.
+
+    DATA: BEGIN OF t_gtdinv OCCURS 0,
+            herkl     TYPE j_3rfgtdinv-herkl,
+            customs   TYPE j_3rfgtdinv-customs,
+            gtddate   TYPE j_3rfgtdinv-gtddate,
+            gtdnumber TYPE j_3rfgtdinv-gtdnumber,
+            gtdpos    TYPE j_3rfgtd-gtdpos,
+            menge     TYPE j_3rfgtdinv-menge,
+          END OF t_gtdinv.
+    DATA: et_gtdinv TYPE  j_3rfgtdinv_t,
+          wa_gtdinv TYPE j_3rfgtdinv.
+    DATA: pos_menge TYPE j_3rfgtdinv-menge,
+          round_fkimg TYPE vbdpr-fkimg,
+          round_smnet TYPE vbdpr-kzwi3,
+          round_smvat TYPE vbdpr-kzwi5,
+          round_total TYPE vbdpr-kzwi4,
+          lnum TYPE i, i_cnt TYPE i,
+          gtd_date(6).
+    DATA: ls_gtd_invoice LIKE LINE OF gtd_invoice[] ,
+          ls_lands       LIKE LINE OF lands[],
+          lt_gtdnumber_split TYPE STANDARD TABLE OF j_3rfgtdinv-gtdnumber WITH DEFAULT KEY.
+
+    CALL FUNCTION 'J_3RFGTD_INVGET'
+      EXPORTING
+        p_invoicenum = i_orig_inv     " vbdkr-vbeln
+        p_invoicepos = i_orig_inv_pos " wa_invoice-zposnr
+        p_read_db    = 'X'
+      IMPORTING
+        et_gtdinv    = et_gtdinv.
+
+    CALL FUNCTION 'FUNCTION_EXISTS'
+      EXPORTING
+        funcname = lv_imcd
+      EXCEPTIONS
+        OTHERS   = 1.
+    IF sy-subrc EQ 0.
+      CALL FUNCTION lv_imcd ##EXISTS
+        EXPORTING
+          it_gtdinv    = et_gtdinv
+          iv_vbeln     = i_orig_inv     " vbdkr-vbeln
+          iv_posnr     = i_orig_inv_pos " wa_invoice-zposnr
+        IMPORTING
+          et_gtdinv    = t_gtdinv[]
+          ev_pos_menge = pos_menge.
+    ELSE.
+      LOOP AT et_gtdinv INTO wa_gtdinv
+        WHERE invoicenum = i_orig_inv     " vbdkr-vbeln
+          AND invoicepos = i_orig_inv_pos." wa_invoice-zposnr.
+        MOVE-CORRESPONDING wa_gtdinv TO t_gtdinv.
+        SELECT SINGLE gtdpos INTO t_gtdinv-gtdpos FROM j_3rfgtd
+          WHERE bukrs    = wa_gtdinv-bukrs
+            AND customs  = wa_gtdinv-customs
+            AND gtdnumber = wa_gtdinv-gtdnumber
+            AND gtddate  = wa_gtdinv-gtddate
+            AND gtdtype  = wa_gtdinv-gtdtype
+            AND lifnr    = wa_gtdinv-lifnr
+            AND posnr    = wa_gtdinv-posnr.
+        pos_menge = pos_menge + t_gtdinv-menge.
+        IF ( t_gtdinv-herkl = 'RU' OR t_gtdinv-herkl = 'KZ'
+            OR t_gtdinv-herkl = 'BY' ).
+          CLEAR: t_gtdinv-customs, t_gtdinv-gtddate,
+                 t_gtdinv-gtdnumber, t_gtdinv-gtdpos.
+        ENDIF.
+        COLLECT t_gtdinv.
+      ENDLOOP.
+    ENDIF.
+
+    IF t_gtdinv[] IS INITIAL.
+      APPEND wa_invoice TO gtd_invoice[].
+      EXIT.
+    ENDIF.
+
+    CLEAR: round_fkimg, round_smnet, round_smvat, round_total, i_cnt.
+    DESCRIBE TABLE t_gtdinv LINES lnum.
+    LOOP AT t_gtdinv.
+      i_cnt = i_cnt + 1.
+      MOVE wa_invoice TO ls_gtd_invoice.
+* country of origin
+      ls_gtd_invoice-zcountry_code = t_gtdinv-herkl.
+      CLEAR ls_gtd_invoice-zcountry_name.
+      IF t_gtdinv-herkl = 'RU'.
+        ls_gtd_invoice-zcountry_name = ' --'.
+        CLEAR ls_gtd_invoice-zcountry_code.
+      ELSE.
+        READ TABLE lands[] INTO ls_lands WITH KEY t_gtdinv-herkl.
+        IF sy-subrc = 0.
+          ls_gtd_invoice-zcountry_name = ls_lands-landx.
+          ls_gtd_invoice-zcountry_code = ls_lands-intcn3.
+        ELSE.
+          SELECT SINGLE land1 landx FROM t005t INTO
+            (ls_lands-herkl, ls_lands-landx)
+            WHERE land1 = t_gtdinv-herkl
+              AND spras = lang.
+          IF sy-subrc = 0.
+            ls_gtd_invoice-zcountry_name = ls_lands-landx.
+            SELECT SINGLE intcn3 FROM t005 INTO ls_lands-intcn3
+              WHERE land1 = t_gtdinv-herkl.
+            APPEND ls_lands TO lands[].
+            ls_gtd_invoice-zcountry_code = ls_lands-intcn3.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+* to build GTD number for printing
+      IF ( t_gtdinv-herkl = 'RU' OR t_gtdinv-herkl = 'KZ'
+          OR t_gtdinv-herkl = 'BY' ).
+        ls_gtd_invoice-zregnum_track = '   -----------------'.
+      ELSE.
+        gtd_date = |{ t_gtdinv-gtddate+6(2) }{ t_gtdinv-gtddate+4(2) }{ t_gtdinv-gtddate+2(2) }|.
+        SPLIT t_gtdinv-gtdnumber AT '/' INTO TABLE lt_gtdnumber_split[].
+        READ TABLE lt_gtdnumber_split[] INDEX 1 INTO t_gtdinv-gtdnumber.
+        ls_gtd_invoice-zregnum_track = |{ t_gtdinv-customs }/{ gtd_date }/{ t_gtdinv-gtdnumber }|.
+      ENDIF.
+* quantity and amounts recalculating
+      IF i_cnt < lnum.
+        ls_gtd_invoice-orig_fkimg = wa_invoice-orig_fkimg * t_gtdinv-menge / pos_menge.
+        round_fkimg = round_fkimg + ls_gtd_invoice-orig_fkimg.
+        ls_gtd_invoice-orig_smnet = wa_invoice-orig_smnet * t_gtdinv-menge / pos_menge.
+        round_smnet = round_smnet + ls_gtd_invoice-orig_smnet.
+        ls_gtd_invoice-orig_smvat = wa_invoice-orig_smvat * t_gtdinv-menge / pos_menge.
+        round_smvat = round_smvat + ls_gtd_invoice-orig_smvat.
+        ls_gtd_invoice-orig_total = wa_invoice-orig_total * t_gtdinv-menge / pos_menge.
+        round_total = round_total + ls_gtd_invoice-orig_total.
+      ELSE.
+        ls_gtd_invoice-orig_fkimg = wa_invoice-orig_fkimg - round_fkimg.
+        ls_gtd_invoice-orig_smnet = wa_invoice-orig_smnet - round_smnet.
+        ls_gtd_invoice-orig_smvat = wa_invoice-orig_smvat - round_smvat.
+        ls_gtd_invoice-orig_total = wa_invoice-orig_total - round_total.
+      ENDIF.
+      APPEND ls_gtd_invoice TO gtd_invoice[].
+    ENDLOOP.
+
+  ENDFORM.                    " GTD_SPLITTING

@@ -1,0 +1,177 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZJ_3RV_CORRINV_A_TC01
+*&---------------------------------------------------------------------*
+
+CLASS lcl_tdc_reader DEFINITION FOR TESTING FINAL.
+  PUBLIC SECTION.
+    METHODS:
+      constructor
+        IMPORTING
+          i_tdc_name TYPE etobj_name,
+      set_variant
+        IMPORTING
+          i_var_name TYPE etvar_id,
+     get_value
+        IMPORTING
+          i_param_name TYPE etpar_name
+        EXPORTING
+          e_paramn_value TYPE any.
+  PRIVATE SECTION.
+    DATA: m_curr_var TYPE etvar_id,                 " текущий вариант
+          mo_tdc TYPE REF TO cl_apl_ecatt_tdc_api.
+ENDCLASS.                    "lcl_tdc_reader DEFINITION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_tdc_reader IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_tdc_reader IMPLEMENTATION.
+
+  METHOD constructor.
+    TRY.
+        mo_tdc = cl_apl_ecatt_tdc_api=>get_instance( i_testdatacontainer = i_tdc_name ).
+      CATCH cx_ecatt_tdc_access.    "
+        " не удалось прочитать TDC
+        cl_aunit_assert=>fail( msg = |Ошибка чтения TDC { i_tdc_name }| ).
+    ENDTRY.
+  ENDMETHOD.                    "constructor
+  METHOD set_variant.
+    m_curr_var = i_var_name.
+  ENDMETHOD.                    "set_variant
+  METHOD get_value.
+    TRY.
+        mo_tdc->get_value(
+          EXPORTING
+            i_param_name   = i_param_name
+            i_variant_name = m_curr_var
+          CHANGING
+            e_param_value  = e_paramn_value ).
+      CATCH cx_ecatt_tdc_access.
+        cl_aunit_assert=>fail( msg = |Ошибка получения значения параметра { i_param_name } из TDC| ).
+    ENDTRY.
+  ENDMETHOD.                    "get_value
+
+ENDCLASS.                    "lcl_tdc_reader IMPLEMENTATION
+
+
+
+*----------------------------------------------------------------------*
+*       CLASS ltd_invoice_row_processor DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS ltd_invoice_row_processor DEFINITION
+      INHERITING FROM lcl_invoice_row_processor FOR TESTING
+      FINAL.
+
+  PROTECTED SECTION.
+    METHODS:
+      invoke_j_3rfgtd_invget  REDEFINITION ,
+      invoke_function_exists  REDEFINITION ,
+      invoke_dynamic_function REDEFINITION ,
+      db_read_t005t           REDEFINITION ,
+      db_read_t005_intcn3     REDEFINITION ,
+      db_read_j_3rfgtd        REDEFINITION .
+
+ENDCLASS.                    "ltd_invoice_row_processor DEFINITION
+
+*----------------------------------------------------------------------*
+*       CLASS ltd_invoice_row_processor IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS ltd_invoice_row_processor IMPLEMENTATION.
+  METHOD invoke_j_3rfgtd_invget.
+    " TODO: Получение данных из TDC
+    " ...
+  ENDMETHOD.                    "invoke_j_3rfgtd_invget
+  METHOD invoke_function_exists   .
+    result = 1.
+  ENDMETHOD.                    "invoke_function_exists
+  METHOD invoke_dynamic_function  .
+    RETURN.
+  ENDMETHOD.                    "invoke_dynamic_function
+  METHOD db_read_t005t            .
+    " TODO: Получение данных из TDC
+    " ...
+  ENDMETHOD.                    "db_read_t005t
+  METHOD db_read_t005_intcn3      .
+    " TODO: Получение данных из TDC
+    " ...
+  ENDMETHOD.                    "db_read_t005_intcn3
+  METHOD db_read_j_3rfgtd         .
+    " TODO: Получение данных из TDC
+    " ...
+  ENDMETHOD.                    "db_read_j_3rfgtd
+ENDCLASS.                    "ltd_invoice_row_processor IMPLEMENTATION
+
+*----------------------------------------------------------------------*
+*       CLASS ltc_invoice_row_processor DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS ltc_invoice_row_processor DEFINITION FOR TESTING FINAL
+  RISK LEVEL HARMLESS
+  DURATION SHORT.
+
+  PRIVATE SECTION.
+    CONSTANTS c_tdc_variant TYPE etvar_id VALUE 'ZTDC_ZJ_3RV_CORRINV_A'.
+    CLASS-DATA: so_tdc TYPE REF TO lcl_tdc_reader.
+    CLASS-METHODS:
+      class_setup.
+    DATA f_cut TYPE REF TO lcl_invoice_row_processor.
+    METHODS:
+      setup,
+      tst_gtd_splitting_01 FOR TESTING.
+
+ENDCLASS.                    "ltc_invoice_row_processor DEFINITION
+
+*----------------------------------------------------------------------*
+*       CLASS ltc_invoice_row_processor IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS ltc_invoice_row_processor IMPLEMENTATION.
+  METHOD class_setup.
+    CREATE OBJECT so_tdc
+      EXPORTING
+        i_tdc_name = c_tdc_variant.
+  ENDMETHOD.                    "class_setup
+
+  METHOD setup.
+    CREATE OBJECT f_cut TYPE ltd_invoice_row_processor.
+  ENDMETHOD.                    "setup
+
+  METHOD tst_gtd_splitting_01.
+    CONSTANTS lc_tdc_variant TYPE etvar_id VALUE 'VAR_01'.
+    DATA: l_orig_inv          TYPE vbeln_vf ,
+          l_orig_inv_pos      TYPE vbrp-posnr ,
+          ls_invoice          LIKE LINE OF it_invoice[],
+          lt_gtd_invoice      TYPE ztj_3rf_tcorrinv,
+          lt_gtd_invoice_exp  TYPE ztj_3rf_tcorrinv.
+
+    "
+    so_tdc->set_variant( lc_tdc_variant ).
+
+    f_cut->gtd_splitting(
+      EXPORTING
+        i_orig_inv     = l_orig_inv
+        i_orig_inv_pos = l_orig_inv_pos
+      CHANGING
+        cs_invoice     = ls_invoice
+        ct_gtd_invoice = lt_gtd_invoice[] ).
+
+    so_tdc->get_value(
+      EXPORTING
+        i_param_name   = |T_GTD_INVOICE_EXP|
+      IMPORTING
+        e_paramn_value = lt_gtd_invoice_exp[] ).
+
+
+    cl_abap_unit_assert=>assert_equals(
+      exp = lt_gtd_invoice_exp[]
+      act = lt_gtd_invoice[] ).
+
+  ENDMETHOD.                    "tst_GTD_SPLITTING_01
+ENDCLASS.                    "ltc_invoice_row_processor IMPLEMENTATION
