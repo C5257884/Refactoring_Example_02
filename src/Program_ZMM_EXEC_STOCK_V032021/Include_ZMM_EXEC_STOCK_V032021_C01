@@ -1,0 +1,245 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZMM_EXEC_STOCK_V032021_C01
+*&---------------------------------------------------------------------*
+CLASS lcx_output DEFINITION INHERITING FROM cx_static_check FINAL.
+ENDCLASS.                    "lcx_output DEFINITION
+
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_output_collector DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_output_collector DEFINITION FINAL.
+  PUBLIC SECTION.
+    TYPES:
+      ty_s_output LIKE LINE OF gt_output[]  ,
+      ty_r_output TYPE REF TO ty_s_output   ,
+      ty_t_ref_output TYPE STANDARD TABLE OF ty_r_output WITH DEFAULT KEY.
+
+    METHODS:
+      constructor
+        IMPORTING i_bukrs TYPE t001-bukrs
+                  i_spmon TYPE zmmcorr16-spmon
+                  ir_t_output LIKE REF TO gt_output[],
+      get_rows
+        IMPORTING i_matnr TYPE mara-matnr
+                  i_lifnr TYPE lfa1-lifnr OPTIONAL
+        RETURNING value(result) TYPE ty_t_ref_output
+        RAISING lcx_output.
+
+  PRIVATE SECTION.
+    DATA: m_bukrs     TYPE t001-bukrs ,
+          m_spmon     TYPE zmmcorr16-spmon,
+          mr_t_output LIKE REF TO gt_output[].
+    METHODS:
+      get_by_matnr
+        IMPORTING i_matnr TYPE mara-matnr
+        RETURNING value(result) TYPE ty_t_ref_output
+        RAISING lcx_output.
+
+ENDCLASS.                    "lcl_output_collector DEFINITION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_output_collector IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_output_collector IMPLEMENTATION.
+
+  METHOD constructor.
+    m_bukrs = i_bukrs.
+    m_spmon = i_spmon.
+    mr_t_output = ir_t_output.
+  ENDMETHOD .                    "constructor
+
+  METHOD get_rows.
+    DATA: lr_row_output TYPE ty_r_output,
+          ls_output TYPE ty_s_output.
+
+    " если пустой LIFNR - отдаем всю выборку по MATNR
+    " иначе
+    "   если MATNR+LIFNR - найден, выводим только эту запись
+    "     иначе добавляем, коппируя нач.сальдо, отдаем всю выборку по MATNR
+
+    IF i_lifnr IS NOT SUPPLIED OR i_lifnr IS INITIAL.
+      result[] = get_by_matnr( i_matnr ).
+    ELSE.
+      READ TABLE mr_t_output->* REFERENCE INTO lr_row_output
+        WITH TABLE KEY bukrs = m_bukrs
+                       matnr = i_matnr
+                       spmon = m_spmon
+                       lifnr = i_lifnr.
+      IF sy-subrc <> 0.
+
+        result[] = get_by_matnr( i_matnr ).
+
+        READ TABLE result[] INTO lr_row_output INDEX 1.
+        IF lr_row_output IS NOT BOUND.
+          RAISE EXCEPTION TYPE lcx_output.
+        ENDIF.
+
+        ls_output-bukrs       = m_bukrs.
+        ls_output-matnr       = i_matnr.
+        ls_output-spmon       = m_spmon.
+        ls_output-lifnr       = i_lifnr.
+        ls_output-stock_41    = lr_row_output->stock_41 .
+        ls_output-w_stock_41  = lr_row_output->w_stock_41 .
+        INSERT ls_output INTO TABLE mr_t_output->* REFERENCE INTO lr_row_output.
+      ENDIF.
+
+      INSERT lr_row_output INTO TABLE result[].
+
+    ENDIF.
+
+  ENDMETHOD .                    "get_row
+
+  METHOD get_by_matnr.
+    DATA: lr_row_output TYPE ty_r_output .
+
+
+    LOOP AT mr_t_output->*[] REFERENCE INTO lr_row_output WHERE bukrs = m_bukrs
+                                                            AND matnr = i_matnr
+                                                            AND spmon = m_spmon.
+      INSERT lr_row_output INTO TABLE result[].
+    ENDLOOP.
+    IF sy-subrc <> 0.
+      RAISE EXCEPTION TYPE lcx_output.
+    ENDIF.
+  ENDMETHOD.                    "get_by_matnr
+
+ENDCLASS.                    "lcl_output_collector IMPLEMENTATION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_peri_conv_exit DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_peri_conv_exit DEFINITION ##FINAL.
+  PUBLIC SECTION.
+    METHODS output
+      IMPORTING input TYPE spmon
+      RETURNING value(output) TYPE string.
+ENDCLASS.                    "lcl_peri_conv_exit DEFINITION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_peri_conv_exit IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_peri_conv_exit IMPLEMENTATION.
+  METHOD output.
+    CALL FUNCTION 'CONVERSION_EXIT_PERI_OUTPUT'
+      EXPORTING
+        input  = input
+      IMPORTING
+        output = output.
+  ENDMETHOD.                    "output
+ENDCLASS.                    "lcl_peri_conv_exit IMPLEMENTATION
+
+*----------------------------------------------------------------------*
+*       INTERFACE LIF_APP_LOG_BY_PIECEMEAL IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+INTERFACE lif_app_log_by_piecemeal.
+  INTERFACES zif_app_log.
+  ALIASES:
+    get_symsg_tab     FOR zif_app_log~get_symsg_tab     ,
+    has_error         FOR zif_app_log~has_error         ,
+    has_warning       FOR zif_app_log~has_warning       ,
+    is_empty          FOR zif_app_log~is_empty          ,
+    refresh           FOR zif_app_log~refresh           ,
+    add_bapiret2      FOR zif_app_log~add_bapiret2      ,
+    add_bapiret2_tab  FOR zif_app_log~add_bapiret2_tab  ,
+    add_symsg         FOR zif_app_log~add_symsg         ,
+    add_symsg_tab     FOR zif_app_log~add_symsg_tab     ,
+    add_exception     FOR zif_app_log~add_exception     ,
+    show_bal_log      FOR zif_app_log~show_bal_log      .
+  METHODS move_msgs_to_main.
+ENDINTERFACE.                    "LIF_APP_LOG_BY_PIECEMEAL IMPLEMENTATION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_log_wrapper DEFINITION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_log_wrapper DEFINITION ##FINAL.
+  PUBLIC SECTION.
+    INTERFACES lif_app_log_by_piecemeal.
+    METHODS:
+      constructor
+        IMPORTING
+          io_log TYPE REF TO zif_app_log.
+
+  PRIVATE SECTION.
+    DATA: mo_log_main TYPE REF TO zif_app_log,
+          mo_log_current TYPE REF TO zif_app_log.
+ENDCLASS.                    "lcl_log_wrapper DEFINITION
+
+*----------------------------------------------------------------------*
+*       CLASS lcl_log_wrapper IMPLEMENTATION
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+CLASS lcl_log_wrapper IMPLEMENTATION.
+  METHOD constructor.
+    super->constructor( ).
+    me->mo_log_main = io_log.
+    CREATE OBJECT mo_log_current TYPE zcl_app_log.
+  ENDMETHOD.                    "constructor
+
+  METHOD lif_app_log_by_piecemeal~move_msgs_to_main.
+    mo_log_main->add_symsg_tab( mo_log_current->get_symsg_tab( ) ).
+    mo_log_current->refresh( ).
+  ENDMETHOD.                    "lif_app_log_by_piecemeal~move_msgs_to_main
+
+  METHOD zif_app_log~get_symsg_tab.
+    rt_symsg_tab = mo_log_current->get_symsg_tab( ).
+  ENDMETHOD.                    "lif_app_log_by_piecemeal~GET_SYMSG_TAB
+
+  METHOD zif_app_log~has_error.
+    result = mo_log_current->has_error( ).
+  ENDMETHOD.                    "zif_app_log~HAS_ERROR
+
+  METHOD zif_app_log~has_warning.
+    result = mo_log_current->has_warning( ).
+  ENDMETHOD.                    "zif_app_log~HAS_WARNING
+
+  METHOD zif_app_log~is_empty.
+    result = mo_log_current->is_empty( ).
+  ENDMETHOD.                    "zif_app_log~IS_EMPTY
+
+  METHOD zif_app_log~refresh.
+    mo_log_current->refresh( ).
+  ENDMETHOD.                    "zif_app_log~REFRESH
+
+  METHOD zif_app_log~add_bapiret2.
+    mo_log_current->add_bapiret2( is_bapiret2 ).
+  ENDMETHOD.                    "zif_app_log~ADD_BAPIRET2
+
+  METHOD zif_app_log~add_bapiret2_tab.
+    mo_log_current->add_bapiret2_tab( it_bapiret2[] ).
+  ENDMETHOD.                    "zif_app_log~ADD_BAPIRET2_TAB
+
+  METHOD zif_app_log~add_symsg.
+    mo_log_current->add_symsg( ).
+  ENDMETHOD.                    "zif_app_log~ADD_SYMSG
+
+  METHOD zif_app_log~add_symsg_tab.
+    mo_log_current->add_symsg_tab( it_symsg[] ).
+  ENDMETHOD.                    "zif_app_log~ADD_SYMSG_TAB
+
+  METHOD zif_app_log~add_exception.
+    mo_log_current->add_exception( ix_err ).
+  ENDMETHOD.                    "zif_app_log~ADD_EXCEPTION
+
+  METHOD zif_app_log~show_bal_log.
+    IF mo_log_current->is_empty( ) = abap_false.
+      mo_log_current->show_bal_log( ).
+    ELSEIF mo_log_main->is_empty( ) = abap_false.
+      mo_log_main->show_bal_log( ).
+    ENDIF.
+  ENDMETHOD.                    "zif_app_log~SHOW_BAL_LOG
+
+ENDCLASS.                    "lcl_log_wrapper IMPLEMENTATION
