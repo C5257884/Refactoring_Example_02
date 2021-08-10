@@ -1,0 +1,1624 @@
+*----------------------------------------------------------------------*
+***INCLUDE ZMM_EXEC_STOCK_V032021_F02 .
+*----------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  AT_SELECTION_SCREEN
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM at_selection_screen .
+  CASE sy-ucomm.
+    WHEN 'FC01'.             " 'Проверка видов движения'
+      PERFORM chk_movtypes
+        USING    '1'                        " output result in ALV-Grid
+        CHANGING gv_c_start_allow_flg
+                 gs_chkmvty_ctrl_alv
+                 gt_chkmvty_data_alv.
+      EXPORT start_allow_flag FROM gv_c_start_allow_flg TO MEMORY ID 'ZZC16N_STRALW'.
+    WHEN OTHERS.
+      RETURN.
+  ENDCASE.
+ENDFORM.                    " AT_SELECTION_SCREEN
+*&---------------------------------------------------------------------*
+*&      Form  AT_SELECTION_SCREEN_OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM at_selection_screen_output .
+
+* Изменение стандартного PF-STATUS в соотвествии результатами проверки Видов движения
+  PERFORM chg_stndt_sspfsta
+    USING gv_c_start_allow_flg.
+
+  LOOP AT SCREEN.
+    CASE gv_c_start_allow_flg.
+      WHEN abap_false.            " проверка не проведена или отрицательный результат
+        screen-active = 0.
+
+      WHEN OTHERS.                " 'X' - проверка пройдена
+        screen-active = 1.
+
+        IF screen-group1 = 'BCH'.
+          IF      p_db    = 'X'.
+            screen-active = 1.
+          ELSEIF  p_save  = 'X'.
+            screen-active = 0.
+          ENDIF.
+        ENDIF.
+    ENDCASE.
+    MODIFY SCREEN.
+  ENDLOOP.
+ENDFORM.                    " AT_SELECTION_SCREEN_OUTPUT
+*&---------------------------------------------------------------------*
+*&      Form  INITIALIZATION
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM initialization .
+  CLEAR so_bwmod[].
+  APPEND 'IEQ1000' TO so_bwmod.
+  APPEND 'IEQ2000' TO so_bwmod.
+
+  PERFORM init_fkey.
+
+  IMPORT start_allow_flag TO gv_c_start_allow_flg FROM MEMORY ID 'ZZC16N_STRALW'.
+  IF gv_c_start_allow_flg = abap_false.
+    CALL FUNCTION 'POPUP_TO_DISPLAY_TEXT'
+      EXPORTING
+        titel        = ' Attention'(114)
+        textline1    = 'Перед началом работы отчета проведите Проверку Видов движения.'(105)
+        textline2    = '(нажмите кнопку ПровВидДв)'(109)
+        start_column = 25
+        start_row    = 6.
+  ENDIF.
+
+  " Создание объектов, используемых программой
+  PERFORM create_app_objs.
+
+ENDFORM.                    " INITIALIZATION
+*&---------------------------------------------------------------------*
+*&      Form  END_OF_SELECTION
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM end_of_selection .
+  DATA:
+    lv_i_retval                TYPE           i       ##NEEDED.
+
+* -----------------------------------------------
+*  Запуск сохранения ретрокоррекции при работе в фоновом режиме
+  IF p_db = 'X' AND p_bchsav = 'X' AND sy-batch = 'X'.
+    PERFORM save_data
+      USING     'X'
+      CHANGING  g_error. "в интерактивном режиме флаг не анализируется
+
+    IF NOT gt_return[] IS INITIAL.
+      PERFORM  msg_write_bapi_
+        USING     gt_return[]
+        CHANGING  lv_i_retval.
+*      PERFORM  msg_write_bapi USING gt_return[].
+      CASE lv_i_retval.
+        WHEN 0 OR 1.
+          FORMAT COLOR COL_POSITIVE.
+          WRITE: / 'Сохранение распределения ретрокоррекции успешно завершено'(001).
+        WHEN 2.
+          FORMAT COLOR COL_TOTAL.
+          WRITE: / 'При сохранении распределения ретрокоррекции возникли предупреждения'(003).
+        WHEN 4 OR 8.
+          FORMAT COLOR COL_NEGATIVE.
+          WRITE: / 'При сохранении распределения ретрокоррекции возникли ошибки'(002).
+      ENDCASE.
+      FORMAT COLOR COL_NORMAL .
+    ELSE.
+*     Add    MESSAGE s139 to log. - как в интреактивном режиме
+      _add_bapi_message gt_return 'S' '139' 'ZMM2'  '' '' '' ''.
+      PERFORM  msg_write_bapi_
+        USING     gt_return[]
+        CHANGING  lv_i_retval.
+      FORMAT COLOR COL_POSITIVE.
+      WRITE: / 'Сохранение распределения ретрокоррекции успешно завершено'(001).
+      FORMAT COLOR COL_NORMAL .
+    ENDIF.
+  ENDIF.
+ENDFORM.                    " END_OF_SELECTION
+*&---------------------------------------------------------------------*
+*&      Form  START_OF_SELECTION
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM start_of_selection RAISING zcx_acc16_write_off.
+  DATA: lr_r_output LIKE REF TO gt_output[].
+
+  GET REFERENCE OF gt_output[] INTO lr_r_output.
+
+  IF p_db = abap_true.
+    CREATE OBJECT go_collect
+      EXPORTING
+        i_bukrs     = p_bukrs
+        i_spmon     = so_spmon-low
+        ir_t_output = lr_r_output.
+  ENDIF.
+
+  PERFORM chk4single_supplier CHANGING gv_c_single_lifnr.
+  PERFORM main_selection.
+  PERFORM output_alv.
+ENDFORM.                    " START_OF_SELECTION
+*&---------------------------------------------------------------------*
+*&      Form  GET_T100K
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM get_t100k  USING    i_bukrs        TYPE t001k-bukrs
+                         it_rng_bwmod   TYPE zif_acc16_db_t001k=>ty_t_rng_bwmod
+                CHANGING ct_t001k       TYPE zif_acc16_db_t001k=>ty_t_bwkey
+                RAISING zcx_acc16_write_off.
+
+  DATA lo_t001k_reader TYPE REF TO zif_acc16_db_t001k.
+
+  CLEAR ct_t001k[].
+
+  CREATE OBJECT lo_t001k_reader TYPE zcl_acc16_db_t001k.
+
+  ct_t001k = lo_t001k_reader->get_bwkeys(
+      i_bukrs      = i_bukrs
+      it_rng_bwmod = it_rng_bwmod ).
+
+ENDFORM.                    " GET_T100K
+*&---------------------------------------------------------------------*
+*&      Form  CREATE_NEW_WRITE_OFF
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM create_new_write_off CHANGING e_error TYPE boole_d.
+  FIELD-SYMBOLS:
+    <ls_bonus>     LIKE LINE OF gt_bonus[]     ,
+    <ls_zmmcorr16> LIKE LINE OF gt_zmmcorr16[] ,
+    <ls_output>    LIKE LINE OF gt_output[] .
+  DATA: l_add_new_row TYPE boole_d ,
+        ls_output     LIKE LINE OF gt_output[] ,
+        lt_rng_matnr  TYPE RANGE OF matnr   ,
+        ls_rng_matnr  LIKE LINE OF lt_rng_matnr[],
+        lv_curr_matnr LIKE <ls_zmmcorr16>-matnr,
+        lv_curr_lifnr LIKE <ls_zmmcorr16>-lifnr.
+
+
+
+  CLEAR e_error.
+
+  "--  SELECT FROM zmmcorr16 WHERE spmon < p_spmon
+  gt_zmmcorr16[] = go_model->db_read_corr16_bef_mnth( ).
+
+  "- Проверяем, что нет незавершенного расчета предыдущего периода
+  PERFORM check_calc_prev_month USING    gt_zmmcorr16[]
+                                CHANGING e_error.
+  IF e_error = abap_true.
+    RETURN.
+  ENDIF.
+
+  SORT gt_zmmcorr16 BY matnr spmon DESCENDING.
+
+  " Достаем нач.сальдо 16 по материалу на начало = сальдо на конец за прошлый период
+  LOOP AT gt_zmmcorr16 ASSIGNING <ls_zmmcorr16>.
+    " таблица gt_zmmcorr16 отсортирована по убыванию поля SPMON,
+    " т.о. первой  оказывается запись за предыдущий период
+    IF lv_curr_matnr <> <ls_zmmcorr16>-matnr OR
+       lv_curr_lifnr <> <ls_zmmcorr16>-lifnr.
+
+      l_add_new_row = abap_true.
+      lv_curr_matnr = <ls_zmmcorr16>-matnr .
+      lv_curr_lifnr = <ls_zmmcorr16>-lifnr .
+    ENDIF.
+
+    IF l_add_new_row = abap_false.
+      CONTINUE.
+    ENDIF.
+
+    CLEAR: ls_output, l_add_new_row.
+
+    ls_output-bukrs = p_bukrs.
+    ls_output-matnr = <ls_zmmcorr16>-matnr.
+    ls_output-spmon = so_spmon-low.
+    ls_output-lifnr = <ls_zmmcorr16>-lifnr.
+
+    IF ( NOT <ls_zmmcorr16>-belnr_kor16    IS INITIAL AND   " Ecть сумма и документ проводки - коррекция учитывыается
+         NOT <ls_zmmcorr16>-gjahr_kor16    IS INITIAL ) AND
+       (     <ls_zmmcorr16>-belnr_kor16_st IS INITIAL AND   " и нет документов сторно
+             <ls_zmmcorr16>-gjahr_kor16_st IS INITIAL ) .
+      ls_output-w_stock_16 = <ls_zmmcorr16>-w_stock_16_fin - <ls_zmmcorr16>-stock_16_fin_kor.
+    ELSE.
+      ls_output-w_stock_16 = <ls_zmmcorr16>-w_stock_16_fin.
+    ENDIF.
+
+    PERFORM collect_output USING ls_output.
+  ENDLOOP.
+
+  " Получение данных по бонусам для текущего периода для распределения
+  gt_bonus[] = go_model->db_read_bonus( ).  "  SELECT  FROM zmmbonush
+  SORT gt_bonus[] BY matnr lifnr.           "           JOIN zmmbonusp
+
+  " Собираем связки материал-поставщик
+  PERFORM fill_inforec_tab USING gt_bonus[]
+                                 gt_zmmcorr16[].
+
+  LOOP AT gt_bonus ASSIGNING <ls_bonus>.
+
+    CLEAR ls_output.
+    MOVE-CORRESPONDING <ls_bonus> TO ls_output.             "#EC ENHOK
+    ls_output-bukrs   = p_bukrs.
+    ls_output-spmon   = so_spmon-low.
+    ls_output-w_gr_16 = <ls_bonus>-wrbtr_diff.        " поступило за период
+
+    PERFORM collect_output USING ls_output.
+  ENDLOOP.
+
+  IF gt_output[] IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  CLEAR lt_rng_matnr[].
+  LOOP AT gt_output[] ASSIGNING <ls_output>.
+    ls_rng_matnr = 'IEQ'.
+    ls_rng_matnr-low = <ls_output>-matnr.
+    APPEND ls_rng_matnr TO lt_rng_matnr[].
+  ENDLOOP.
+
+
+  "-- формирования GT_OUTPUT по данным MSEG
+  PERFORM process_mseg  USING    lt_rng_matnr[]
+                        CHANGING e_error.
+  "-- вычисление начального сальдо по S031
+  PERFORM process_s031  USING lt_rng_matnr[].
+  "-- вычисление Коэффициега и Сумм к распределению
+  PERFORM fill_calculated_fields.
+
+ENDFORM.                    " CREATE_NEW_WRITE_OFF
+*&---------------------------------------------------------------------*
+*&      Form  READ_EXISTING_WRITE_OFF
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM read_existing_write_off .
+  DATA: ls_inforec         LIKE LINE OF gt_inforec[],
+        lt_zmmcorr16_saved TYPE zcl_acc16_write_off_m=>ty_t_zmmcorr16 ,
+        ls_output LIKE LINE OF gt_output[].
+  FIELD-SYMBOLS: <ls_zmmcorr16_saved> LIKE LINE OF lt_zmmcorr16_saved[].
+
+*  SELECT * INTO CORRESPONDING FIELDS OF TABLE gt_output[]
+  lt_zmmcorr16_saved[] = go_model->db_read_corr16_curr_mnth( ).
+
+  LOOP AT lt_zmmcorr16_saved[] ASSIGNING <ls_zmmcorr16_saved>.
+
+    MOVE-CORRESPONDING <ls_zmmcorr16_saved> TO ls_output .
+    INSERT ls_output INTO TABLE gt_output[].
+
+    MOVE-CORRESPONDING ls_output TO ls_inforec.
+    COLLECT ls_inforec INTO gt_inforec.
+  ENDLOOP.
+
+ENDFORM.                    " READ_EXISTING_SELECTION
+*&---------------------------------------------------------------------*
+*&      Form  FILL_INFOREC_TAB
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM fill_inforec_tab  USING    it_bonus      LIKE gt_bonus[]
+                                it_zmmcorr16  LIKE gt_zmmcorr16[] .
+
+  FIELD-SYMBOLS:
+    <ls_zmmcorr16> LIKE LINE OF it_zmmcorr16[],
+    <ls_bonus> LIKE LINE OF it_bonus[].
+  DATA: ls_inforec LIKE LINE OF gt_inforec[].
+
+  CLEAR gt_inforec[].
+* Собираем связки материал-поставщик
+  LOOP AT it_bonus[] ASSIGNING <ls_bonus>.
+    ls_inforec-matnr = <ls_bonus>-matnr.
+    ls_inforec-lifnr = <ls_bonus>-lifnr.
+    COLLECT ls_inforec INTO gt_inforec[].
+  ENDLOOP.
+  LOOP AT it_zmmcorr16[] ASSIGNING <ls_zmmcorr16>.
+    ls_inforec-matnr = <ls_zmmcorr16>-matnr.
+    ls_inforec-lifnr = <ls_zmmcorr16>-lifnr.
+    COLLECT ls_inforec INTO gt_inforec[].
+  ENDLOOP.
+
+  SORT gt_inforec[].
+
+ENDFORM.                    " FILL_INFOREC_TAB
+*&---------------------------------------------------------------------*
+*&      Form  FILTER_MSEG
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM filter_mseg  CHANGING ct_mseg TYPE gty_t_mseg.
+  FIELD-SYMBOLS: <ls_mseg> LIKE LINE OF ct_mseg.
+
+
+  DELETE ct_mseg WHERE bwmod NOT IN so_bwmod
+                    OR mvmtp16 = 'GRS' AND bsakz = 'T'.
+
+  LOOP AT ct_mseg ASSIGNING <ls_mseg>
+                            WHERE werks <> ''
+                             AND umwrk <> ''
+*                            AND bwmod IN so_bwmod      " лишнее условие, т.к. NOT IN so_bwmod были удалены
+                             AND bwmod_u IN so_bwmod
+                             AND intr = 'X'.
+
+    CHECK <ls_mseg>-matnr = <ls_mseg>-ummat.
+
+    DELETE ct_mseg[]. " INDEX sy-tabix.
+  ENDLOOP.
+
+ENDFORM.                    " FILTER_MSEG
+*&---------------------------------------------------------------------*
+*&      Form  SET_TEXTS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM set_texts_and_groups  CHANGING ct_output TYPE tt_output.
+  TYPES: BEGIN OF ty_s_lifnr_name,
+          name1 TYPE lfa1-name1 ,
+          name2 TYPE lfa1-name2 ,
+          name3 TYPE lfa1-name3 ,
+          name4 TYPE lfa1-name4 ,
+          full_name TYPE zcl_acc16_write_off_m=>ty_s_outdata-name,
+        END OF ty_s_lifnr_name.
+  TYPES: BEGIN OF ty_s_matnr_text,
+          matnr TYPE mara-matnr,
+          maktx TYPE makt-maktx,
+         END OF ty_s_matnr_text,
+         ty_t_matnr_text TYPE STANDARD TABLE OF ty_s_matnr_text WITH KEY primary_key COMPONENTS matnr.
+  TYPES: BEGIN OF ty_s_lifnr_text,
+          lifnr TYPE lfa1-lifnr.
+          INCLUDE TYPE ty_s_lifnr_name.
+  TYPES: END OF ty_s_lifnr_text,
+         ty_t_lifnr_text TYPE STANDARD TABLE OF ty_s_lifnr_text WITH KEY primary_key COMPONENTS lifnr .
+
+  DATA: lt_matnr_text   TYPE ty_t_matnr_text,
+        ls_matnr_text   LIKE LINE OF lt_matnr_text[],
+        lt_lifnr_text   TYPE ty_t_lifnr_text ,
+        ls_lifnr_text   LIKE LINE OF lt_lifnr_text[],
+        lv_output_lifnr LIKE LINE OF gt_output_lifnr[],
+        ls_output_spmon LIKE LINE OF gt_output_spmon[].
+
+  FIELD-SYMBOLS:
+        <ls_matnr_text> LIKE LINE OF lt_matnr_text[] ,
+        <ls_lifnr_text> LIKE LINE OF lt_lifnr_text[] ,
+        <ls_output>     LIKE LINE OF ct_output[].
+
+
+  CLEAR: gt_output_lifnr[], gt_output_spmon[].
+
+  LOOP AT ct_output[] ASSIGNING <ls_output> .
+
+    <ls_output>-koef_out = <ls_output>-koef.
+
+    READ TABLE lt_matnr_text[] TRANSPORTING NO FIELDS
+                               WITH KEY matnr = <ls_output>-matnr.
+    IF sy-subrc <> 0.
+      ls_matnr_text-matnr = <ls_output>-matnr.
+      INSERT ls_matnr_text INTO TABLE lt_matnr_text[].
+    ENDIF.
+
+    READ TABLE lt_lifnr_text[] TRANSPORTING NO FIELDS
+                               WITH KEY lifnr = <ls_output>-lifnr.
+    IF sy-subrc <> 0.
+      ls_lifnr_text-lifnr = <ls_output>-lifnr.
+      INSERT ls_lifnr_text INTO TABLE lt_lifnr_text[].
+      lv_output_lifnr-lifnr = <ls_output>-lifnr.
+      INSERT lv_output_lifnr INTO TABLE gt_output_lifnr[].
+    ENDIF.
+
+    ls_output_spmon-spmon = <ls_output>-spmon.
+    COLLECT ls_output_spmon INTO gt_output_spmon[].
+  ENDLOOP.
+
+  IF lt_matnr_text[] IS NOT INITIAL.
+    "-- DB
+    SELECT matnr maktx
+      INTO TABLE lt_matnr_text[]
+      FROM makt
+      FOR ALL ENTRIES IN lt_matnr_text[]
+     WHERE matnr = lt_matnr_text-matnr
+       AND spras = sy-langu.
+  ENDIF.
+
+  IF lt_lifnr_text[] IS NOT INITIAL.
+    "-- DB
+    SELECT lifnr name1 name2 name3 name4
+      INTO TABLE lt_lifnr_text
+      FROM lfa1
+      FOR ALL ENTRIES IN lt_lifnr_text[]
+     WHERE lifnr = lt_lifnr_text-lifnr.
+  ENDIF.
+
+  LOOP AT ct_output[] ASSIGNING <ls_output> .
+
+    READ TABLE lt_matnr_text[] ASSIGNING <ls_matnr_text>
+                                WITH TABLE KEY matnr = <ls_output>-matnr.
+    IF sy-subrc = 0.
+      <ls_output>-maktx = <ls_matnr_text>-maktx.
+    ENDIF.
+
+    READ TABLE lt_lifnr_text[] ASSIGNING <ls_lifnr_text>
+                                WITH TABLE KEY lifnr = <ls_output>-lifnr.
+    IF sy-subrc = 0.
+      IF <ls_lifnr_text>-full_name IS INITIAL.
+        <ls_lifnr_text>-full_name = <ls_lifnr_text>-name1 && <ls_lifnr_text>-name2 &&
+                                    <ls_lifnr_text>-name3 && <ls_lifnr_text>-name4 .
+      ENDIF.
+      <ls_output>-name = <ls_lifnr_text>-full_name .
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.                    " SET_TEXTS
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_CALC_PREV_MONTH
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_GT_ZMMCORR16[]  text
+*----------------------------------------------------------------------*
+FORM check_calc_prev_month  USING     it_zmmcorr16 LIKE gt_zmmcorr16[]
+                            CHANGING  e_error      TYPE boole_d.
+
+  IF it_zmmcorr16[] IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  LOOP AT it_zmmcorr16 TRANSPORTING NO FIELDS WHERE belnr_fi = ''.
+    e_error = 'X'.
+    EXIT.
+  ENDLOOP.
+
+  IF e_error <> 'X'.
+    e_error = 'X'.
+    LOOP AT gt_zmmcorr16 TRANSPORTING NO FIELDS WHERE NOT ( belnr_fi <> '' AND belnr_st <> '' ).
+      CLEAR e_error.
+    ENDLOOP.
+  ENDIF.
+
+  IF e_error = 'X'.
+    MESSAGE s024 WITH 'Расчет ретрокоррекции за предыдущий период'(m06)
+      'еще не завершен.'(m07) 'Начальное сальдо 16 счета не корректно'(m08).
+    STOP.
+  ENDIF.
+
+ENDFORM.                    " CHECK_CALC_PREV_MONTH
+*&---------------------------------------------------------------------*
+*&      Form  COLLECT_OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_GS_OUTPUT  text
+*----------------------------------------------------------------------*
+FORM collect_output  USING    is_output LIKE LINE OF gt_output[]. "TYPE t_output.
+  FIELD-SYMBOLS:
+    <ls_output>     LIKE LINE OF gt_output[] ,
+    <ls_output_new> LIKE LINE OF gt_output[] .
+
+  READ TABLE gt_output ASSIGNING <ls_output>
+    WITH TABLE KEY bukrs = is_output-bukrs
+                   matnr = is_output-matnr
+                   spmon = is_output-spmon
+                   lifnr = is_output-lifnr.   " <-- с учетом поставщика
+  IF sy-subrc <> 0.
+    "-- если строка не найдена, то добавляем
+    IF is_output-w_stock_16 = 0.
+      " попробуем получить начальное сальдо от такого же MATNR, но с другим LIFNR
+      READ TABLE gt_output ASSIGNING <ls_output>
+        WITH KEY bukrs = is_output-bukrs
+                 matnr = is_output-matnr
+                 spmon = is_output-spmon.
+    ENDIF.
+
+    INSERT is_output INTO TABLE gt_output[] ASSIGNING <ls_output_new>.
+
+    IF <ls_output> IS ASSIGNED .                            " <-- значит  есть уже строка по другому поставщику
+      <ls_output_new>-w_stock_16 = <ls_output>-w_stock_16.  " копируем нач.остаток
+    ENDIF.
+  ELSE.
+    <ls_output>-w_stock_41    = <ls_output>-w_stock_41    + is_output-w_stock_41  .
+    <ls_output>-w_grs_41      = <ls_output>-w_grs_41      + is_output-w_grs_41  .
+    <ls_output>-w_gro_41      = <ls_output>-w_gro_41      + is_output-w_gro_41  .
+    <ls_output>-w_stock_16    = <ls_output>-w_stock_16    + is_output-w_stock_16  .
+    <ls_output>-w_gr_16       = <ls_output>-w_gr_16       + is_output-w_gr_16  .
+    <ls_output>-w_gi_9002     = <ls_output>-w_gi_9002     + is_output-w_gi_9002  .
+    <ls_output>-w_gi_9002_16  = <ls_output>-w_gi_9002_16  + is_output-w_gi_9002_16  .
+    <ls_output>-w_gi_900201   = <ls_output>-w_gi_900201   + is_output-w_gi_900201  .
+    <ls_output>-w_gi_900202   = <ls_output>-w_gi_900202   + is_output-w_gi_900202  .
+    <ls_output>-w_gi_9102     = <ls_output>-w_gi_9102     + is_output-w_gi_9102  .
+    <ls_output>-w_gi_94       = <ls_output>-w_gi_94       + is_output-w_gi_94  .
+    <ls_output>-w_gi_900201_16  = <ls_output>-w_gi_900201_16  + is_output-w_gi_900201_16  .
+    <ls_output>-w_gi_900202_16  = <ls_output>-w_gi_900202_16  + is_output-w_gi_900202_16  .
+    <ls_output>-w_gi_9102_16    = <ls_output>-w_gi_9102_16    + is_output-w_gi_9102_16  .
+    <ls_output>-w_gi_94_16      = <ls_output>-w_gi_94_16      + is_output-w_gi_94_16  .
+    <ls_output>-w_stock_16_fin    = <ls_output>-w_stock_16_fin    + is_output-w_stock_16_fin  .
+    <ls_output>-stock_16_fin_kor  = <ls_output>-stock_16_fin_kor  + is_output-stock_16_fin_kor  .
+    <ls_output>-stock_41  = <ls_output>-stock_41  + is_output-stock_41    .
+    <ls_output>-grs_41    = <ls_output>-grs_41    + is_output-grs_41      .
+    <ls_output>-gro_41    = <ls_output>-gro_41    + is_output-gro_41      .
+    <ls_output>-gr_16     = <ls_output>-gr_16     + is_output-gr_16       .
+    <ls_output>-gi_9002   = <ls_output>-gi_9002   + is_output-gi_9002     .
+    <ls_output>-gi_900201 = <ls_output>-gi_900201 + is_output-gi_900201   .
+    <ls_output>-gi_900202 = <ls_output>-gi_900202 + is_output-gi_900202   .
+    <ls_output>-gi_9102   = <ls_output>-gi_9102   + is_output-gi_9102     .
+    <ls_output>-gi_94     = <ls_output>-gi_94     + is_output-gi_94       .
+  ENDIF.
+
+ENDFORM.                    " COLLECT_OUTPUT
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_MSEG
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*      -->P_GT_MSEG[]  text
+*----------------------------------------------------------------------*
+FORM process_mseg   USING    it_rng_matnr TYPE zmm_t_rng_matnr
+                    CHANGING e_error      TYPE boole_d.
+
+  DATA: lt_mseg TYPE gty_t_mseg        ,
+        ls_mseg LIKE LINE OF lt_mseg[] .
+  DATA: lt_ref_output TYPE lcl_output_collector=>ty_t_ref_output.
+  FIELD-SYMBOLS:
+    <ls_ref_output> LIKE LINE OF lt_ref_output[]  .
+
+  "-- читаем все движения материала за текущий период
+  lt_mseg[] =
+    go_model->get_mseg_for_mnth( iv_spmon = so_spmon-low
+                                 it_rng_matnr = it_rng_matnr[] ).
+  "--  фильтрация GT_MSEG[]
+  PERFORM filter_mseg CHANGING lt_mseg[].
+
+  CLEAR gt_return[].
+  LOOP AT lt_mseg[] INTO ls_mseg.
+
+    CASE ls_mseg-mvmtp16.
+      WHEN 'N'.
+        CONTINUE.
+      WHEN ''.
+        e_error = 'X'.
+        MESSAGE e134(zmm2) WITH ls_mseg-bwart ls_mseg-shkzg INTO sy-msgli.
+        _add_bapi_message gt_return 'E' '134' 'ZMM2' ls_mseg-bwart ls_mseg-shkzg '' ''.
+        CONTINUE.
+    ENDCASE.
+
+    IF ls_mseg-shkzg = 'H'.
+      ls_mseg-menge = - ls_mseg-menge.
+    ENDIF.
+    IF ls_mseg-mvmtp16(1) = '9'.
+      ls_mseg-menge = - ls_mseg-menge.
+    ENDIF.
+    IF ls_mseg-menge < 0.
+      ls_mseg-dmbtr = - ls_mseg-dmbtr.
+    ENDIF.
+
+    TRY .
+        "-- получаем строки из выходной таблицы по материпл + поставщик (или по материалу)
+        CASE ls_mseg-mvmtp16.
+          WHEN 'GRS' OR 'GRO'.
+            lt_ref_output[] = go_collect->get_rows( i_matnr = ls_mseg-matnr ) .
+          WHEN OTHERS.
+            lt_ref_output[] = go_collect->get_rows( i_matnr = ls_mseg-matnr i_lifnr = ls_mseg-lifnr ) .
+        ENDCASE.
+      CATCH lcx_output.
+        ASSERT 1 = 0.
+    ENDTRY.
+
+    LOOP AT lt_ref_output[] ASSIGNING <ls_ref_output>.
+      CASE ls_mseg-mvmtp16.
+        WHEN '9022'.
+          ADD ls_mseg-menge TO <ls_ref_output>->gi_900202.
+          ADD ls_mseg-dmbtr TO <ls_ref_output>->w_gi_900202.
+        WHEN 'GRS'.                                     " Поступило за период от поставщика
+          ADD ls_mseg-menge TO <ls_ref_output>->grs_41.
+          ADD ls_mseg-dmbtr TO <ls_ref_output>->w_grs_41.
+        WHEN 'GRO'.                                     " Прочие поступления за период
+          ADD ls_mseg-menge TO <ls_ref_output>->gro_41.
+          ADD ls_mseg-dmbtr TO <ls_ref_output>->w_gro_41.
+        WHEN '902'.
+          ADD ls_mseg-menge TO <ls_ref_output>->gi_900201.
+          ADD ls_mseg-dmbtr TO <ls_ref_output>->w_gi_900201.
+        WHEN '912'.
+          ADD ls_mseg-menge TO <ls_ref_output>->gi_9102.
+          ADD ls_mseg-dmbtr TO <ls_ref_output>->w_gi_9102.
+        WHEN '94'.
+          ADD ls_mseg-menge TO <ls_ref_output>->gi_94.
+          ADD ls_mseg-dmbtr TO <ls_ref_output>->w_gi_94.
+      ENDCASE.
+    ENDLOOP.
+  ENDLOOP.
+
+  IF NOT gt_return[] IS INITIAL.
+    SORT gt_return.
+    DELETE ADJACENT DUPLICATES FROM gt_return.
+    PERFORM msg_show_bapi USING gt_return.
+    STOP.
+  ENDIF.
+
+ENDFORM.                    " PROCESS_MSEG
+*&---------------------------------------------------------------------*
+*&      Form  PROCESS_S031
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM process_s031 USING it_rng_matnr TYPE zmm_t_rng_matnr.
+  DATA: lt_ref_output TYPE lcl_output_collector=>ty_t_ref_output.
+  FIELD-SYMBOLS:
+    <ls_s031> LIKE LINE OF gt_s031[] ,
+    <ls_ref_output> LIKE LINE OF lt_ref_output[].
+
+*  SELECT * FROM s031 WHERE matnr IN gr_matnr AND spmon < p_spmon
+  gt_s031[] = go_model->db_read_s031( it_rng_matnr = it_rng_matnr[]  it_t001k = gt_t001k ).
+
+  LOOP AT gt_s031[] ASSIGNING <ls_s031>.
+
+    TRY .
+        lt_ref_output[] = go_collect->get_rows( i_matnr = <ls_s031>-matnr ) .
+      CATCH lcx_output.
+        ASSERT 1 = 0.
+    ENDTRY.
+
+    LOOP AT lt_ref_output[] ASSIGNING <ls_ref_output>.
+      IF <ls_s031>-spmon < so_spmon-low.
+        <ls_ref_output>->stock_41 = <ls_ref_output>->stock_41 + <ls_s031>-mzubb - <ls_s031>-magbb.
+        <ls_ref_output>->w_stock_41 = <ls_ref_output>->w_stock_41 + <ls_s031>-wzubb - <ls_s031>-wagbb.
+      ELSE.
+        <ls_ref_output>->stock_41 = <ls_ref_output>->stock_41 + <ls_s031>-mzubb - <ls_s031>-magbb.
+        <ls_ref_output>->w_stock_41 = <ls_ref_output>->w_stock_41 + <ls_s031>-wzubb - <ls_s031>-wagbb.
+      ENDIF.
+    ENDLOOP.
+  ENDLOOP.
+
+ENDFORM.                    " PROCESS_S031
+*&---------------------------------------------------------------------*
+*&      Form  FILL_CALCULATED_FIELDS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM fill_calculated_fields .
+  FIELD-SYMBOLS <ls_output> LIKE LINE OF gt_output[].
+
+  LOOP AT gt_output ASSIGNING <ls_output>.
+    " Коэф
+    <ls_output>-koef = <ls_output>-w_stock_41 +  <ls_output>-w_grs_41 +  <ls_output>-w_gro_41.
+    IF <ls_output>-koef <> 0.
+      <ls_output>-koef = (  <ls_output>-w_stock_16 +  <ls_output>-w_gr_16 ) / (  <ls_output>-w_stock_41 +  <ls_output>-w_grs_41 +  <ls_output>-w_gro_41 ).
+    ENDIF.
+
+    " Ретрокоррекция, деление по счетам 9002
+    <ls_output>-w_gi_9002 = <ls_output>-w_gi_900201 + <ls_output>-w_gi_900202.
+    IF (  <ls_output>-w_stock_41 +  <ls_output>-w_grs_41 +  <ls_output>-w_gro_41 ) NE 0.
+      <ls_output>-w_gi_9002_16 = <ls_output>-w_gi_9002 * (  <ls_output>-w_stock_16 +  <ls_output>-w_gr_16 ) /
+        (  <ls_output>-w_stock_41 +  <ls_output>-w_grs_41 +  <ls_output>-w_gro_41 ).
+    ENDIF.
+    <ls_output>-gi_9002 = <ls_output>-gi_900201 + <ls_output>-gi_900202.
+    IF (  <ls_output>-w_stock_41 +  <ls_output>-w_grs_41 +  <ls_output>-w_gro_41 ) NE 0.
+      <ls_output>-w_gi_900202_16 = <ls_output>-w_gi_900202 * (  <ls_output>-w_stock_16 +  <ls_output>-w_gr_16 ) /
+        (  <ls_output>-w_stock_41 +  <ls_output>-w_grs_41 +  <ls_output>-w_gro_41 ).
+      <ls_output>-w_gi_900201_16 = <ls_output>-w_gi_900201 * (  <ls_output>-w_stock_16 +  <ls_output>-w_gr_16 ) /
+        (  <ls_output>-w_stock_41 +  <ls_output>-w_grs_41 +  <ls_output>-w_gro_41 ).
+      <ls_output>-w_gi_9102_16 = <ls_output>-w_gi_9102 *  (  <ls_output>-w_stock_16 +  <ls_output>-w_gr_16 ) /
+       (  <ls_output>-w_stock_41 +  <ls_output>-w_grs_41 +  <ls_output>-w_gro_41 ).
+      <ls_output>-w_gi_94_16 = <ls_output>-w_gi_94 * (  <ls_output>-w_stock_16 +  <ls_output>-w_gr_16 ) /
+        (  <ls_output>-w_stock_41 +  <ls_output>-w_grs_41 +  <ls_output>-w_gro_41 ).
+    ENDIF.
+
+    <ls_output>-w_stock_16_fin = ( <ls_output>-w_stock_16 + <ls_output>-w_gr_16 ) -
+      ( <ls_output>-w_gi_900201_16 + <ls_output>-w_gi_900202_16 + <ls_output>-w_gi_9102_16 + <ls_output>-w_gi_94_16 ).
+  ENDLOOP.
+
+ENDFORM.                    " FILL_CALCULATED_FIELDS
+*&---------------------------------------------------------------------*
+*&      Form  DELETE_CALC_WO_POSTING
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM delete_calc_wo_posting
+    CHANGING cs_slis_selfield TYPE slis_selfield.
+  "---------------------------------------------------------------
+
+  DATA: l_popup_answer(1) ,
+        l_answ(1),
+        lt_index_rows   TYPE lvc_t_row,
+        lt_keys         TYPE zcl_acc16_write_off_m=>ty_t_zmmcorr16_pk ,
+        lt_keys_01      TYPE zcl_acc16_write_off_m=>ty_t_zmmcorr16_pk .
+
+
+  _call_popup_dialog 'Предупреждение'(050) 'Удалить расчет, не имеющий проводок?'(116)
+    'Да'(052) 'Нет'(053) '2' '' l_popup_answer.
+
+  IF l_popup_answer <> '1'.
+    RETURN.
+  ENDIF.
+
+  gs_ctrl_alv-r_alv->get_selected_rows( IMPORTING et_index_rows = lt_index_rows[] ).
+
+  IF lines( lt_index_rows[] ) = 0.
+    "-- не выделены строки
+    MESSAGE text-m25 TYPE cc_msgty_i DISPLAY LIKE cc_msgty_e.
+    RETURN.
+  ELSE.
+    "-- проверка на то, что выделенные строки не имеют проводок
+    PERFORM sel_rows_have_posting
+      USING     lt_index_rows[]
+      CHANGING  l_answ.
+    IF l_answ = abap_true.
+      MESSAGE text-m26 TYPE cc_msgty_i DISPLAY LIKE cc_msgty_e.
+      RETURN.
+    ENDIF.
+
+    "-- получаем ключи
+    PERFORM get_sel_rows_keys
+      USING     lt_index_rows[]
+      CHANGING  lt_keys[].
+
+    "-- удаление
+    lt_keys_01[] = go_model->db_del_corr16_kyes( lt_keys[] ).
+
+    PERFORM del_view_outtab_rows
+      USING     lt_keys[]
+                lt_keys_01[]
+      CHANGING  cs_slis_selfield-refresh.
+  ENDIF.
+
+ENDFORM.                    " DELETE_CALC_WO_POSTING
+*&---------------------------------------------------------------------*
+*&      Form  CHECK_ROWS_HAVE_NOT_POSTING
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM sel_rows_have_posting  USING    it_index_rows TYPE lvc_t_row
+                            CHANGING c_answ        TYPE char1.
+
+  FIELD-SYMBOLS: <ls_outputrow> LIKE LINE OF gt_output[] ,
+                 <ls_index_row> LIKE LINE OF it_index_rows[].
+
+  CLEAR c_answ.
+
+  LOOP AT it_index_rows[] ASSIGNING <ls_index_row>.
+
+    READ TABLE gt_output[] ASSIGNING <ls_outputrow> INDEX <ls_index_row>-index.
+    IF sy-subrc <> 0.
+      CONTINUE.
+    ENDIF.
+
+    IF <ls_outputrow>-belnr_fi        IS NOT INITIAL OR
+       <ls_outputrow>-belnr_st        IS NOT INITIAL OR
+       <ls_outputrow>-belnr_kor16     IS NOT INITIAL OR
+       <ls_outputrow>-belnr_kor16_st  IS NOT INITIAL .
+
+      c_answ = abap_true.
+      RETURN.
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.                    " CHECK_ROWS_HAVE_NOT_POSTING
+*&---------------------------------------------------------------------*
+*&      Form  GET_SEL_ROWS_KEYS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM get_sel_rows_keys  USING    it_index_rows TYPE lvc_t_row
+                        CHANGING ct_keys       TYPE zcl_acc16_write_off_m=>ty_t_zmmcorr16_pk.
+
+  FIELD-SYMBOLS: <ls_outputrow> LIKE LINE OF gt_output[] ,
+                 <ls_index_row> LIKE LINE OF it_index_rows[].
+  DATA ls_key LIKE LINE OF ct_keys[].
+
+
+  CLEAR ct_keys[].
+
+  LOOP AT it_index_rows[] ASSIGNING <ls_index_row>.
+
+    READ TABLE gt_output[] ASSIGNING <ls_outputrow> INDEX <ls_index_row>-index.
+    IF sy-subrc <> 0.
+      CONTINUE.
+    ENDIF.
+
+    MOVE-CORRESPONDING <ls_outputrow> TO ls_key.
+    INSERT ls_key INTO TABLE ct_keys[].
+  ENDLOOP.
+
+ENDFORM.                    " GET_SEL_ROWS_KEYS
+*&---------------------------------------------------------------------*
+*&      Form  DEL_VIEW_OUTTAB_ROWS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM del_view_outtab_rows  USING    it_keys         TYPE zcl_acc16_write_off_m=>ty_t_zmmcorr16_pk
+                                    it_not_del_keys TYPE zcl_acc16_write_off_m=>ty_t_zmmcorr16_pk
+                           CHANGING c_refresh       TYPE slis_selfield-refresh .
+
+  FIELD-SYMBOLS <ls_key> LIKE LINE OF it_keys[].
+
+
+  IF it_keys[] IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  IF lines( it_keys[] ) = lines( it_not_del_keys[] ).
+    "-- вообще ничего не удалось удалить
+    c_refresh = abap_false.
+    MESSAGE text-m27 TYPE cc_msgty_i DISPLAY LIKE cc_msgty_e.
+  ELSE.
+
+    c_refresh = abap_true.
+
+    LOOP AT it_keys[] ASSIGNING <ls_key>.
+
+      READ TABLE it_not_del_keys[] TRANSPORTING NO FIELDS
+        WITH TABLE KEY mandt = sy-mandt
+                       bukrs = <ls_key>-bukrs
+                       matnr = <ls_key>-matnr
+                       spmon = <ls_key>-spmon
+                       lifnr = <ls_key>-lifnr.
+      IF sy-subrc = 0.
+        CONTINUE.
+      ENDIF.
+      DELETE gt_output[] WHERE mandt = sy-mandt
+                           AND bukrs = <ls_key>-bukrs
+                           AND matnr = <ls_key>-matnr
+                           AND spmon = <ls_key>-spmon
+                           AND lifnr = <ls_key>-lifnr.
+    ENDLOOP.
+
+    IF lines( it_not_del_keys[] ) <> 0.
+      MESSAGE text-m28 TYPE cc_msgty_i DISPLAY LIKE cc_msgty_e.
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    " DEL_VIEW_OUTTAB_ROWS
+*&---------------------------------------------------------------------*
+*&      Form  CREATE_APP_OBJS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM create_app_objs .
+  DATA: lo_ssc   TYPE REF TO zcl_acc16_write_off_ssc.
+
+  CREATE OBJECT lo_ssc.
+
+  CREATE OBJECT go_model TYPE zcl_acc16_write_off_m
+    EXPORTING
+      io_ssc = lo_ssc.
+
+  CREATE OBJECT go_log TYPE zcl_app_log .
+
+  CREATE OBJECT go_bl TYPE zcl_acc_16_write_off_bl
+    EXPORTING
+      io_ssc   = lo_ssc
+      io_log   = go_log
+      io_model = go_model.
+
+  lo_ssc->set_par( i_name = lo_ssc->c_nam_par-p_bukrs   i_val  = p_bukrs ).
+  lo_ssc->set_par( i_name = lo_ssc->c_nam_par-p_spmon   i_val  = so_spmon-low ).
+  lo_ssc->set_par( i_name = lo_ssc->c_nam_par-so_spmon  i_val  = so_spmon[] ).
+*  lo_ssc->set_par( i_name = 'GS_SPMON'                  i_val  = gs_spmon ).
+  lo_ssc->set_par( i_name = lo_ssc->c_nam_par-so_bwmod  i_val  = so_bwmod[] ).
+  lo_ssc->set_par( i_name = lo_ssc->c_nam_par-so_lifnr  i_val  = so_lifnr[] ).
+  lo_ssc->set_par( i_name = lo_ssc->c_nam_par-so_matnr  i_val  = so_matnr[] ).
+ENDFORM.                    " CREATE_APP_OBJS
+*&---------------------------------------------------------------------*
+*&      Form  UCOMM_POSTKOR16
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM ucomm_postkor16  CHANGING cv_refresh_alv.
+  DATA: l_answer(1) ,
+        lt_output_lifnr LIKE gt_output[],
+        lv_err          TYPE boole_d,
+        flg_last_lifnr  TYPE boole_d,
+        flg_last_spmon  TYPE boole_d,
+        lo_log          TYPE REF TO lif_app_log_by_piecemeal.
+  FIELD-SYMBOLS:
+        <ls_output_lifnr> LIKE LINE OF gt_output_lifnr[] ,
+        <ls_output_spmon> LIKE LINE OF gt_output_spmon[] .
+*----------------------------------------------------------------------*
+
+
+  gs_ctrl_alv-s_kor16-flg_pst_allow   = abap_true.     " проверка флага: разрешено создание док-тов KOR16
+  _call_popup_dialog 'Предупреждение'(050) 'Вы действительно хотите сделать проводку коррекции сальдо 16 сч?'(051)
+        'Да'(052) 'Нет'(053) '2' '' l_answer.
+  IF l_answer <> '1'.
+    RETURN.
+  ENDIF.
+
+  CLEAR: gt_return[], g_error, gv_flow_control, flg_last_lifnr.
+
+  go_log->refresh( ).
+  go_bl->reset_answer( ).
+
+  CREATE OBJECT lo_log TYPE lcl_log_wrapper
+    EXPORTING
+      io_log = go_log.
+
+  SORT gt_output_spmon[] ASCENDING.
+
+  LOOP AT gt_output_spmon[] ASSIGNING <ls_output_spmon>.
+    AT LAST.
+      flg_last_spmon = abap_true.
+    ENDAT.
+
+    LOOP AT gt_output_lifnr[] ASSIGNING <ls_output_lifnr>.
+      AT LAST.
+        IF flg_last_spmon = abap_true.
+          flg_last_lifnr = abap_true.
+        ENDIF.
+      ENDAT.
+
+      PERFORM get_output_by_lifnr USING    <ls_output_lifnr>-lifnr
+                                           <ls_output_spmon>-spmon
+                                  CHANGING lt_output_lifnr[].
+      CHECK lt_output_lifnr[] IS NOT INITIAL.
+
+      TRY .
+          "---- Fi-проводка
+          PERFORM post_kor16_docs USING     lt_output_lifnr[]
+                                            abap_true                 " Commit - Yes
+                                            <ls_output_lifnr>-lifnr
+                                            <ls_output_spmon>-spmon
+                                            lo_log.
+          cv_refresh_alv = abap_true.
+          PERFORM set_info_status. " Обновление данных в GT_OUTPUT[]
+          lo_log->move_msgs_to_main( ).
+        CATCH zcx_acc16_write_off.
+
+          g_error = abap_true.
+          lo_log->show_bal_log( ).
+          lo_log->move_msgs_to_main( ).
+
+          PERFORM flow_err_control USING    flg_last_lifnr
+                                            'POSTKOR16'
+                                   CHANGING lv_err.
+          IF lv_err = abap_true.
+            lo_log->show_bal_log( ).
+            lo_log->move_msgs_to_main( ).
+            EXIT.
+          ENDIF.
+      ENDTRY.
+    ENDLOOP.  " --------------------------- AT gt_output_lifnr[]
+    IF lv_err = abap_true.
+      EXIT.
+    ENDIF.
+  ENDLOOP.  " --------------------------- GT_SPMON[]
+
+  IF go_log->is_empty( ) = abap_false.
+    IF go_log->has_error( ) = abap_true.
+      " 'Ошибка создания документов ручных корректировок исходящего сальдо по сч.16'
+      MESSAGE e016(zmm_acc16_write_off) WITH text-119 INTO sy-msgli.
+    ELSE.
+
+      gs_ctrl_alv-s_kor16-flg_fld_changed = abap_false.    " сброс флага: Данные изменены
+      gs_ctrl_alv-s_kor16-flg_pst_allow   = abap_false.    " сброс флага: разрешено создание док-тов KOR16
+
+      IF lo_log->has_warning( ) = abap_true.
+        MESSAGE w016(zmm_acc16_write_off) WITH text-120 INTO sy-msgli.
+      ELSE.
+        " 'Документы по корректировке остатков на начало месяца успешно созданы'
+        MESSAGE i016(zmm_acc16_write_off) WITH text-121 INTO sy-msgli.
+      ENDIF.
+    ENDIF.
+    go_log->add_symsg( ).
+    go_log->show_bal_log( ).
+  ENDIF.
+
+  FREE lo_log.
+
+ENDFORM.                    " UCOMM_POSTKOR16
+*&---------------------------------------------------------------------*
+*&      Form  UCOMM_STRNKOR16
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM ucomm_strnkor16  CHANGING cv_refresh_alv.
+  DATA: l_answer(1) ,
+        ls_msgtxt       TYPE string ,
+        lt_output_lifnr LIKE gt_output[],
+        lv_err          TYPE boole_d,
+        flg_last_lifnr  TYPE boole_d,
+        flg_last_spmon  TYPE boole_d,
+        lo_log          TYPE REF TO lif_app_log_by_piecemeal .
+  FIELD-SYMBOLS:
+        <ls_output_lifnr> LIKE LINE OF gt_output_lifnr[] ,
+        <ls_output_spmon> LIKE LINE OF gt_output_spmon[] .
+*----------------------------------------------------------------------*
+
+  _call_popup_dialog 'Предупреждение'(050) 'Вы действительно хотите сторнировать проводку коррекции сальдо 16 сч?'(090)
+    'Да'(052) 'Нет'(053) '2' '' l_answer.
+  IF l_answer <> '1'.
+    RETURN.
+  ENDIF.
+
+  CLEAR: gt_return[], g_error, gv_flow_control,
+         flg_last_spmon, flg_last_lifnr .
+
+  go_log->refresh( ).
+  CREATE OBJECT lo_log TYPE lcl_log_wrapper
+    EXPORTING
+      io_log = go_log.
+
+  SORT gt_output_spmon[] DESCENDING.
+
+  LOOP AT gt_output_spmon[] ASSIGNING <ls_output_spmon>.
+    AT LAST.
+      flg_last_spmon = abap_true.
+    ENDAT.
+    LOOP AT gt_output_lifnr[] ASSIGNING <ls_output_lifnr>.
+      AT LAST.
+        IF flg_last_spmon = abap_true.
+          flg_last_lifnr = abap_true.
+        ENDIF.
+      ENDAT.
+
+      PERFORM get_output_by_lifnr USING    <ls_output_lifnr>-lifnr
+                                           <ls_output_spmon>-spmon
+                                  CHANGING lt_output_lifnr[].
+      CHECK lt_output_lifnr[] IS NOT INITIAL.
+
+      TRY .
+          PERFORM cancel_posting_kor16_docs USING    abap_true                 " Commit - Yes
+                                                     <ls_output_lifnr>-lifnr
+                                                     <ls_output_spmon>-spmon
+                                                     lo_log
+                                            CHANGING lt_output_lifnr[]
+                                                     gs_ctrl_alv               " ALV
+                                                     ls_msgtxt   .             " ----   RT0K916270.RTKDEVSAP-33
+          cv_refresh_alv = abap_true.
+          PERFORM set_info_status. " Обновление данных в GT_OUTPUT[]
+          lo_log->move_msgs_to_main( ).
+        CATCH zcx_acc16_write_off.
+          g_error = abap_true.
+          lo_log->show_bal_log( ).
+          lo_log->move_msgs_to_main( ).
+          PERFORM flow_err_control USING    flg_last_lifnr
+                                            'STKORR16'
+                                   CHANGING lv_err.
+          IF lv_err = abap_true.
+            lo_log->show_bal_log( ).
+            lo_log->move_msgs_to_main( ).
+            EXIT.
+          ENDIF.
+      ENDTRY.
+    ENDLOOP.  " ---------------- AT gt_output_lifnr[]
+    IF lv_err = abap_true.
+      EXIT.
+    ENDIF.
+  ENDLOOP.  " ---------------- AT gt_output_spmon[]
+
+  IF go_log->is_empty( ) = abap_false.
+    IF go_log->has_error( ) = abap_true.
+      MESSAGE e017(zmm_acc16_write_off) WITH text-119 INTO sy-msgli.
+    ELSEIF lo_log->has_warning( ) = abap_true.
+      MESSAGE w017(zmm_acc16_write_off) WITH text-120 INTO sy-msgli.
+    ELSE.
+      MESSAGE i017(zmm_acc16_write_off) WITH text-121 INTO sy-msgli.
+    ENDIF.
+    go_log->add_symsg( ).
+    go_log->show_bal_log( ).
+  ENDIF.
+
+  FREE lo_log.
+ENDFORM.                    " UCOMM_STRNKOR16
+*&---------------------------------------------------------------------*
+*&      Form  GET_OUTPUT_BY_LIFNR
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM get_output_by_lifnr  USING    iv_lifnr         TYPE lfa1-lifnr
+                                   iv_spmon         TYPE spmon
+                          CHANGING et_output_lifnr  LIKE gt_output[].
+
+  FIELD-SYMBOLS <ls_output> LIKE LINE OF gt_output[].
+
+  CLEAR et_output_lifnr[].
+
+  LOOP AT gt_output[] ASSIGNING <ls_output> WHERE lifnr = iv_lifnr
+                                              AND spmon = iv_spmon.
+    INSERT <ls_output> INTO TABLE et_output_lifnr[].
+  ENDLOOP.
+
+ENDFORM.                    " GET_OUTPUT_BY_LIFNR
+*&---------------------------------------------------------------------*
+*&      Form  UCOMM_POST
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM ucomm_post  CHANGING cv_refresh    TYPE boole_d .
+  DATA: lv_popup_answ(1),
+        flg_last_month    TYPE boole_d,
+        flg_last_lifnr    TYPE boole_d,
+        lx_err            TYPE REF TO zcx_acc16_write_off,
+        lo_log            TYPE REF TO zif_app_log.
+  FIELD-SYMBOLS: <ls_output_lifnr> LIKE LINE OF gt_output_lifnr[] ,
+                 <lv_output_spmon> LIKE LINE OF gt_output_spmon[] .
+
+  _call_popup_dialog 'Предупреждение'(050) 'Провести распределение ретрокоррекции?'(057)
+    'Да'(052) 'Нет'(053) '2' '' lv_popup_answ.
+  IF lv_popup_answ <> '1'.
+    RETURN.
+  ENDIF.
+
+  CLEAR: gt_return[], gv_flow_control.
+
+  " Сохраним данные отчета при необходимости
+  IF p_db = abap_true.
+    PERFORM save_data USING    abap_false
+                      CHANGING g_error.
+    IF g_error = abap_true.
+      PERFORM msg_show_bapi USING gt_return[].
+      RETURN.
+    ENDIF.
+  ENDIF.
+
+  CREATE OBJECT lo_log TYPE zcl_app_log.
+
+  SORT gt_output_spmon[] ASCENDING.
+
+  LOOP AT gt_output_spmon[] ASSIGNING <lv_output_spmon>.
+    AT LAST.
+      flg_last_month = abap_true.
+    ENDAT.
+
+    CLEAR flg_last_lifnr.
+    LOOP AT gt_output_lifnr[] ASSIGNING <ls_output_lifnr>.
+      AT LAST.
+        IF flg_last_month = abap_true.
+          flg_last_lifnr = abap_true.
+        ENDIF.
+      ENDAT.
+
+      go_log->refresh( ).
+
+      TRY .
+          " Проверки перед проведением
+          go_bl->check_before_posting( iv_spmon   = <lv_output_spmon>-spmon
+                                       iv_lifnr   = <ls_output_lifnr>-lifnr
+                                       it_outdata = gt_output[] ).
+
+          " Запрос параметров проводки
+          PERFORM ask_params_fipost USING    <lv_output_spmon>-spmon
+                                             <ls_output_lifnr>-lifnr
+                                    CHANGING gs_scr_0110.
+          IF gs_scr_0110-ok_code = 'OK'.
+
+            " Формирование проводок в gпо поставщикам
+            PERFORM post_data USING <ls_output_lifnr>-lifnr   <lv_output_spmon>-spmon.
+
+          ELSEIF gs_scr_0110-ok_code = 'CANCEL'.
+            g_error = abap_true.
+            " Операция отменена пользователем
+            MESSAGE e007(zmm_acc16_write_off) INTO sy-msgli.
+            go_log->add_symsg( ).
+            lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+            go_log->refresh( ).
+            EXIT.
+          ENDIF.
+
+        CATCH zcx_acc16_write_off INTO lx_err.
+          go_log->add_exception( lx_err ).
+          go_log->show_bal_log( ).
+          lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+          go_log->refresh( ).
+
+          PERFORM flow_err_control USING    flg_last_lifnr
+                                            'POST'
+                                   CHANGING g_error.
+          IF g_error = abap_true.
+            go_log->show_bal_log( ).
+            lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+            EXIT.
+          ENDIF.
+      ENDTRY.
+      cv_refresh = abap_true.
+      PERFORM set_info_status. " Обновление данных в GT_OUTPUT[]
+      lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+      go_log->refresh( ).
+    ENDLOOP.  " --------------------------- AT gt_output_lifnr[]
+    IF g_error = abap_true.
+      EXIT.
+    ENDIF.
+  ENDLOOP.  " --------------------------- GT_SPMON[]
+
+  IF lo_log->is_empty( ) = abap_false.
+    IF lo_log->has_error( ) = abap_true.
+      MESSAGE e008(zmm_acc16_write_off) WITH 'с ошибками'(119) INTO sy-msgli.
+    ELSEIF lo_log->has_warning( ) = abap_true.
+      MESSAGE w008(zmm_acc16_write_off) WITH 'с предупреждениями'(120) INTO sy-msgli.
+    ELSE.
+      MESSAGE i008(zmm_acc16_write_off) WITH 'без ошибок'(121) INTO sy-msgli.
+    ENDIF.
+    lo_log->add_symsg( ).
+    lo_log->show_bal_log( ).
+    FREE lo_log.
+  ENDIF.
+
+ENDFORM.                    " UCOMM_POST
+*&---------------------------------------------------------------------*
+*&      Form  UCOMM_STORNO
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM ucomm_storno  CHANGING cv_refresh    TYPE boole_d .
+  DATA: lv_popup_answ(1) ,
+        lt_belnr        TYPE zcl_acc16_write_off_m=>ty_t_fidoc,
+        flg_last_spmon  TYPE boole_d,
+        flg_last_lifnr  TYPE boole_d,
+        lo_log          TYPE REF TO zif_app_log,
+        lx_err          TYPE REF TO zcx_acc16_write_off.
+  FIELD-SYMBOLS:
+        <lv_output_spmon> LIKE LINE OF gt_output_spmon[],
+        <lv_output_lifnr> LIKE LINE OF gt_output_lifnr[],
+        <ls_belnr>        LIKE LINE OF lt_belnr[] .
+
+
+  CREATE OBJECT lo_log TYPE zcl_app_log.
+
+  IF NOT so_matnr[] IS INITIAL.
+    MESSAGE e011(zmm_acc16_write_off) INTO sy-msgli.
+    lo_log->add_symsg( ).
+    lo_log->show_bal_log( ).
+    RETURN.
+  ENDIF.
+
+  _call_popup_dialog  'Предупреждение'(050) 'Сторнировать распределение ретрокоррекции?'(055)
+    'Да'(052) 'Нет'(053) '2' '' lv_popup_answ.
+  IF lv_popup_answ <> '1'.
+    RETURN.
+  ENDIF.
+
+  CLEAR: gt_return[], gv_flow_control.
+
+  SORT gt_output_spmon[] DESCENDING.
+
+  LOOP AT gt_output_spmon[] ASSIGNING <lv_output_spmon>.
+    AT LAST.
+      flg_last_spmon = abap_true.
+    ENDAT.
+
+    CLEAR flg_last_lifnr.
+    LOOP AT gt_output_lifnr[] ASSIGNING <lv_output_lifnr>.
+      AT LAST.
+        IF flg_last_spmon = abap_true.
+          flg_last_lifnr = abap_true.
+        ENDIF.
+      ENDAT.
+
+      go_log->refresh( ).
+
+      TRY .
+          " Проверки перед сторнированием
+          lt_belnr[] = go_bl->check_before_reversing( iv_spmon   = <lv_output_spmon>-spmon
+                                                      iv_lifnr   = <lv_output_lifnr>-lifnr
+                                                      it_outdata = gt_output[] ).
+          " Запрос параметров проводок
+          PERFORM ask_params_fipost_storno USING    lt_belnr[]
+                                                    <lv_output_lifnr>-lifnr
+                                                    <lv_output_spmon>-spmon
+                                           CHANGING gs_scr_0110.
+          IF gs_scr_0110-ok_code = 'OK'.
+
+
+            LOOP AT lt_belnr[] ASSIGNING <ls_belnr>.
+
+              TRY .
+                  " Сторно
+                  PERFORM cancel_posting USING <ls_belnr>.
+
+                CATCH zcx_acc16_write_off INTO lx_err.
+
+                  go_log->add_exception( lx_err ).
+                  go_log->show_bal_log( ).
+                  lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+                  go_log->refresh( ).
+
+                  PERFORM flow_err_control USING    flg_last_lifnr
+                                                    'STORNO'
+                                           CHANGING g_error.
+                  IF g_error = abap_true.
+                    IF go_log->is_empty( ) = abap_false.
+                      go_log->show_bal_log( ).
+                      lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+                    ENDIF.
+                    EXIT.
+                  ENDIF.
+              ENDTRY.
+
+              cv_refresh = abap_true.
+              PERFORM set_info_status. " Обновление данных в GT_OUTPUT[]
+              lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+              go_log->refresh( ).
+            ENDLOOP.  " AT lt_belnr[]
+
+            cv_refresh = abap_true.
+
+          ELSEIF gs_scr_0110-ok_code = 'CANCEL'.
+            g_error = abap_true.
+            " Операция прервана пользователем
+            MESSAGE e007(zmm_acc16_write_off) INTO sy-msgli.
+            go_log->add_symsg( ).
+            lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+            go_log->refresh( ).
+            EXIT.
+          ENDIF.
+        CATCH zcx_acc16_write_off INTO lx_err.
+          go_log->add_exception( lx_err ).
+          go_log->show_bal_log( ).
+          lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+          go_log->refresh( ).
+
+          PERFORM flow_err_control USING    flg_last_lifnr
+                                            'STORNO'
+                                   CHANGING g_error.
+          IF g_error = abap_true.
+            IF go_log->is_empty( ) = abap_false.
+              go_log->show_bal_log( ).
+              lo_log->add_symsg_tab( go_log->get_symsg_tab( ) ).
+            ENDIF.
+            EXIT.
+          ENDIF.
+      ENDTRY.
+    ENDLOOP. " AT gt_output_lifnr[]
+    IF gs_scr_0110-ok_code = 'CANCEL'.
+      " Операция отменена пользователем
+      MESSAGE text-062 TYPE 'S' DISPLAY LIKE  'E'.
+      EXIT.
+    ENDIF.
+  ENDLOOP. " AT gt_output_spmon[]
+
+*  IF gt_return[] IS NOT INITIAL.
+*    PERFORM msg_show_bapi USING gt_return[].
+*  ENDIF.
+  IF lo_log->is_empty( ) = abap_false.
+    IF lo_log->has_error( ) = abap_true.
+      MESSAGE e012(zmm_acc16_write_off) WITH 'с ошибками' INTO sy-msgli.
+    ELSEIF lo_log->has_warning( ) = abap_true.
+      MESSAGE w012(zmm_acc16_write_off) WITH 'с предупреждениями' INTO sy-msgli.
+    ELSE.
+      MESSAGE i012(zmm_acc16_write_off) WITH 'без ошибок' INTO sy-msgli.
+    ENDIF.
+    lo_log->add_symsg( ).
+    lo_log->show_bal_log( ).
+    FREE lo_log.
+  ENDIF.
+
+  IF g_error = abap_false.
+    MESSAGE s140.
+  ENDIF.
+
+ENDFORM.                    " UCOMM_STORNO
+*&---------------------------------------------------------------------*
+*&      Form  ASK_FIPOST_PARAMS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM ask_params_fipost  USING    i_spmon     TYPE spmon
+                                 i_lifnr     TYPE lfa1-lifnr
+                        CHANGING cs_scr_0110 TYPE ty_s_scr_0110.
+
+  CLEAR cs_scr_0110.
+  cs_scr_0110-mode        = '1'.
+  cs_scr_0110-spmon       = i_spmon.
+  cs_scr_0110-lifnr       = i_lifnr.
+  cs_scr_0110-fl_wo_lifnr = abap_false.
+  cs_scr_0110-budat       = cs_scr_0110-bldat = sy-datum.
+  cs_scr_0110-run_mode    = zcl_acc16_write_off_m=>cs_hist_mode-post.
+
+  PERFORM get_last_day_of_period USING     i_spmon
+                                 CHANGING  cs_scr_0110-bldat.
+
+  CALL SCREEN 0110 STARTING AT 25 5.
+
+ENDFORM.                    " ASK_FIPOST_PARAMS
+
+*&---------------------------------------------------------------------*
+*&      Form  ask_fipost_cancel_params
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM ask_params_fipost_storno USING    it_belnr    TYPE zcl_acc16_write_off_m=>ty_t_fidoc
+                                       iv_lifnr    TYPE lfa1-lifnr  ##NEEDED
+                                       iv_spmon    TYPE spmon
+                              CHANGING cs_scr_0110 TYPE ty_s_scr_0110.
+
+  FIELD-SYMBOLS: <ls_fidoc>     LIKE LINE OF it_belnr[],
+                 <ls_cancl_doc> LIKE LINE OF cs_scr_0110-cancl_docs[].
+
+  " Запрос дат для док.сторно
+  CLEAR cs_scr_0110.
+
+  IF it_belnr[] IS INITIAL.
+    cs_scr_0110-ok_code = 'CONTINUE'.
+    RETURN.
+  ENDIF.
+
+  cs_scr_0110-mode      = '1'.
+  cs_scr_0110-run_mode  = zcl_acc16_write_off_m=>cs_hist_mode-storno.
+  IF cs_scr_0110-stgrd IS INITIAL.
+    cs_scr_0110-stgrd = '04'.
+  ENDIF.
+
+
+  SELECT belnr gjahr bukrs budat bldat
+    INTO CORRESPONDING FIELDS OF TABLE cs_scr_0110-cancl_docs[]
+    FROM bkpf
+    FOR ALL ENTRIES IN it_belnr[]
+   WHERE belnr = it_belnr-belnr
+     AND gjahr = it_belnr-gjahr
+     AND bukrs = p_bukrs.
+
+  LOOP AT it_belnr[] ASSIGNING <ls_fidoc>.
+    READ TABLE cs_scr_0110-cancl_docs[] ASSIGNING <ls_cancl_doc>
+      WITH TABLE KEY belnr = <ls_fidoc>-belnr
+                     gjahr = <ls_fidoc>-gjahr
+                     bukrs = <ls_fidoc>-bukrs.
+    IF sy-subrc = 0.
+      <ls_cancl_doc>-lifnr = <ls_fidoc>-lifnr.
+      <ls_cancl_doc>-spmon = <ls_fidoc>-spmon.
+    ENDIF.
+  ENDLOOP.
+
+  READ TABLE cs_scr_0110-cancl_docs[] ASSIGNING <ls_cancl_doc> INDEX 1.
+  cs_scr_0110-spmon       = iv_spmon.
+  cs_scr_0110-budat       = sy-datum.
+  cs_scr_0110-bldat       = <ls_cancl_doc>-bldat.
+  cs_scr_0110-lifnr       = <ls_cancl_doc>-lifnr.
+  cs_scr_0110-fl_wo_lifnr = abap_false.
+
+  CALL SCREEN 0110 STARTING AT 25 5.
+
+ENDFORM.                    " ASK_FIPOST_PARAMS
+
+*&---------------------------------------------------------------------*
+*&      Form  FLOW_ERR_CONTROL
+*&---------------------------------------------------------------------*
+*  При ошибке возможны следуюшие варианты:
+*     Запросить пользователя
+*  1) Прервать обработку
+*  2) Продолжить обработку дальше до сл.ошибки и снова запросить пользователя
+*  3) Продолжить, не останавливаясь на ошибках
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+FORM flow_err_control  USING    i_flg_last_lifnr TYPE boole_d
+                                oper             TYPE char10    ##NEEDED
+                       CHANGING ev_err           TYPE boole_d.
+
+  CLEAR ev_err.
+
+  IF gv_flow_control = gc_flow_control-ignore.
+    RETURN.
+  ELSEIF i_flg_last_lifnr = abap_true.
+    ev_err = abap_true.
+    RETURN.
+  ENDIF.
+
+  CLEAR gs_scr_0120.
+  gs_scr_0120-ask = abap_true. " Дефолтное значение "Продолжить до следующей ошибки"
+
+  CALL SCREEN 0120 STARTING AT 25 5.
+
+  gv_flow_control = gs_scr_0120-ok_code.
+
+  IF gv_flow_control = gc_flow_control-break.
+    MESSAGE e007(zmm_acc16_write_off) INTO sy-msgli.
+    go_log->add_symsg( ).
+    ev_err = abap_true.
+  ENDIF.
+
+ENDFORM.                    " FLOW_ERR_CONTROL
+*&---------------------------------------------------------------------*
+*&      Module  STATUS_0120  OUTPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE status_0120 OUTPUT.
+  SET PF-STATUS 'GUI_0120'.
+ENDMODULE.                 " STATUS_0120  OUTPUT
+*&---------------------------------------------------------------------*
+*&      Module  USER_COMMAND_0120  INPUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+MODULE user_command_0120 INPUT.
+
+  IF gs_scr_0120-ok_code = 'OK'.
+
+    CASE abap_true.
+      WHEN gs_scr_0120-ask.
+        gs_scr_0120-ok_code = gc_flow_control-ask.
+      WHEN gs_scr_0120-break.
+        gs_scr_0120-ok_code = gc_flow_control-break.
+      WHEN gs_scr_0120-ignore.
+        gs_scr_0120-ok_code = gc_flow_control-ignore.
+      WHEN OTHERS.
+        RETURN.
+    ENDCASE.
+    LEAVE TO SCREEN 0.
+  ENDIF.
+
+ENDMODULE.                 " USER_COMMAND_0120  INPUT
+*&---------------------------------------------------------------------*
+*&      Form  UCOMM_SAVE
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  -->  p1        text
+*  <--  p2        text
+*----------------------------------------------------------------------*
+FORM ucomm_save .
+  DATA: l_answer(1),
+        ls_spmon LIKE LINE OF so_spmon[].
+
+
+  _call_popup_dialog 'Предупреждение'(050) 'Сохранить распределение ретрокоррекции?'(056)
+    'Да'(052) 'Нет'(053) '2' '' l_answer.
+  IF l_answer <> '1'.
+    RETURN.
+  ENDIF.
+
+  CLEAR gt_return[].
+
+  PERFORM save_data USING    abap_true
+                    CHANGING g_error.
+
+  IF NOT gt_return[] IS INITIAL.
+    PERFORM msg_show_bapi USING gt_return[].
+  ELSE.
+    READ TABLE so_spmon[] INTO ls_spmon INDEX 1.
+    MESSAGE s151 WITH ls_spmon-low ls_spmon-high.
+  ENDIF.
+  PERFORM set_info_status.              " Обновление данных в GT_OUTPUT[]
+
+ENDFORM.                    " UCOMM_SAVE
