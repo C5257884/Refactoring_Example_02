@@ -117,6 +117,7 @@ public section.
       !MSGV4 type SYMSGV optional
       !T100KEY type SCX_T100KEY optional .
       
+CLASS ZCL_ACC_16_WRITE_OFF_BL IMPLEMENTATION.
 
 method CONSTRUCTOR.
 CALL METHOD SUPER->CONSTRUCTOR
@@ -136,3 +137,4 @@ else.
 endif.
 endmethod.
       
+ENDCLASS.
