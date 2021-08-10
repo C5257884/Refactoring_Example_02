@@ -1,0 +1,283 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZMM_EXEC_STOCK_V032021_TOP
+*&---------------------------------------------------------------------*
+TABLES: mara, t001k, zmmcorr16, eina .
+TABLES sscrfields.
+
+TYPE-POOLS: slis, icon.
+CLASS cl_alv01_hdlr DEFINITION DEFERRED.
+
+* ------------------------------
+*   C O N S T A N T S
+* ------------------------------
+CONSTANTS:
+  cc_cell_mode_dsp(1)        TYPE           c       VALUE 'D'           ##needed, " cl_gui_alv_grid=>mc_style_disabled
+  cc_cell_mode_chg(1)        TYPE           c       VALUE 'C'           ##needed. " cl_gui_alv_grid=>mc_style_enabled
+CONSTANTS:
+  cc_fc_chgkor16             TYPE           syucomm VALUE 'CH_KOR16'    ##needed, " Изм/просм.Корр16
+  cc_fc_savkor16             TYPE           syucomm VALUE 'SAVE_KOR16'  ##needed, " Сохр.Корр16
+  cc_fc_postkor16            TYPE           syucomm VALUE 'POST_KOR16'  ##needed, " Проводка Корр16
+  cc_fc_strnkor16            TYPE           syucomm VALUE 'STRN_KOR16'  ##needed, " Сторно Корр16
+  cc_fc_delwopost            TYPE           syucomm VALUE 'DELETE'              . " Удалить расчет без FI проводок
+CONSTANTS:
+  cc_msgty_x(1)              TYPE           c       VALUE 'X'           ##needed,   "Dump
+  cc_msgty_a(1)              TYPE           c       VALUE 'A'           ##needed,   "Abort
+  cc_msgty_e(1)              TYPE           c       VALUE 'E'           ##needed,   "Error
+  cc_msgty_w(1)              TYPE           c       VALUE 'W'           ##needed,   "Warning
+  cc_msgty_i(1)              TYPE           c       VALUE 'I'           ##needed,   "Information
+  cc_msgty_s(1)              TYPE           c       VALUE 'S'           ##needed.   "Success
+CONSTANTS:
+  ci_retval_s                TYPE           sysubrc VALUE 0             ##needed,   "Success
+  ci_retval_i                TYPE           sysubrc VALUE 1             ##needed,   "Information
+  ci_retval_w                TYPE           sysubrc VALUE 2             ##needed,   "Warning
+  ci_retval_e                TYPE           sysubrc VALUE 4             ##needed,   "Error
+  ci_retval_x                TYPE           sysubrc VALUE 8             ##needed,   "Abort
+  ci_retval_a                TYPE           sysubrc VALUE 9             ##needed.   "Dump
+
+* ------------------------------
+*   T Y P E S
+* ------------------------------
+* Типы для контролей и данных ALV-объектов
+* -- ALV технические поля
+TYPES:
+  BEGIN OF t_alv_fcat_techfld,
+    rowcolor(4)              TYPE           c         , " Entire row color field (Cxyz;x:1=gry-blu,2=l.gry,
+                                                        "                 3=ylw,4=bl-grn,5=grn,6=red,7=orng)
+    cellcolors               TYPE           lvc_t_scol, " Cells coloring table
+    cellstyles               TYPE           lvc_t_styl, " Cells as pushbuttons(individual editions)
+    sel(1)                   TYPE           c         , " Selected rows contain 'X'
+    mark(1)                  TYPE           c         , " row marked for business process 'X'
+  END   OF t_alv_fcat_techfld.
+
+TYPES:
+  BEGIN OF t_zmmcorr16_key,
+    bukrs	                   TYPE           bukrs,
+    matnr	                   TYPE           matnr,
+    spmon	                   TYPE           spmon,
+    lifnr                    TYPE           lfa1-lifnr,
+  END   OF t_zmmcorr16_key,
+  tt_zmmcorr16_key           TYPE STANDARD TABLE OF t_zmmcorr16_key
+                              WITH NON-UNIQUE KEY primary_key COMPONENTS bukrs matnr spmon.
+
+* BAPI interface 'BAPI_ACC_DOCUMENT_POST'
+TYPES:
+* -- Importing
+  BEGIN OF t_bapi_accdocpost_i,
+   s_documentheader	         TYPE           bapiache09,
+   s_customercpd             TYPE           bapiacpa09,
+   s_contractheader          TYPE           bapiaccahd,
+  END   OF t_bapi_accdocpost_i,
+
+* -- Exporting
+  BEGIN OF t_imp_bapi_objky,
+    awref                    TYPE           awref,  " Source document number
+    aworg                    TYPE           aworg,  " Number range ID (if required)
+  END   OF t_imp_bapi_objky,
+  BEGIN OF t_bapi_accdocpost_e,
+    obj_type                 TYPE           bapiache09-obj_type,
+    obj_key	                 TYPE           bapiache09-obj_key ,
+    obj_sys	                 TYPE           bapiache09-obj_sys ,
+    doc                      TYPE           t_imp_bapi_objky   ,
+  END   OF t_bapi_accdocpost_e,
+
+* -- Tables
+  BEGIN OF t_bapi_accdocpost_t,
+    t_accountgl              TYPE           bapiacgl09_tab ,
+    t_accountreceivable      TYPE           bapiacar09_tab ,
+    t_accountpayable         TYPE           bapiacap09_tab ,
+    t_accounttax             TYPE           bapiactx09_tab ,
+    t_currencyamount         TYPE           bapiaccr09_tab ,
+    t_criteria               TYPE           bapiackec9_tab ,
+    t_valuefield             TYPE           bapiackev9_tab ,
+    t_extension1             TYPE           bapiacextc_tab ,
+    t_return                 TYPE           bapiret2_tab   ,
+    t_paymentcard            TYPE           bapiacpc09_tab ,
+    t_contractitem           TYPE           bapiaccait_tab ,
+    t_extension2             TYPE           bapiparex_tab  ,
+    t_realestate             TYPE           bapiacre09_tab ,
+    t_accountwt              TYPE           bapiacwt09_tab ,
+  END   OF t_bapi_accdocpost_t,
+*
+  BEGIN OF t_bapi_accdocpost_if,
+    import                   TYPE          t_bapi_accdocpost_i,
+    export                   TYPE          t_bapi_accdocpost_e,
+    tables                   TYPE          t_bapi_accdocpost_t,
+  END   OF t_bapi_accdocpost_if,
+  tt_bapi_accdocpost_if      TYPE STANDARD TABLE OF   t_bapi_accdocpost_if  ##needed.
+
+TYPES:
+  BEGIN OF t_bapi_accdocrevpost_i,
+    s_reversal               TYPE           bapiacrev,
+    bus_act                  TYPE           bapiache09-bus_act,
+  END   OF t_bapi_accdocrevpost_i,
+
+  BEGIN OF t_bapi_accdocrevpost_e,
+    obj_type                 TYPE          bapiacrev-obj_type,
+    obj_key	                 TYPE          bapiacrev-obj_key,
+    obj_sys	                 TYPE          bapiacrev-obj_sys,
+  END   OF t_bapi_accdocrevpost_e,
+
+  BEGIN OF t_bapi_accdocrevpost_t,
+    t_return                 TYPE           bapiret2_tab   ,
+  END   OF t_bapi_accdocrevpost_t,
+
+  BEGIN OF t_bapi_accdocrevpost_if,
+    import                   TYPE          t_bapi_accdocrevpost_i  ,
+    export                   TYPE          t_bapi_accdocrevpost_e  ,
+    tables                   TYPE          t_bapi_accdocrevpost_t  ,
+    t_db_corr16_key          TYPE          tt_zmmcorr16_key        ,
+    belnr_kor16_st           TYPE          zmmcorr16-belnr_kor16_st,
+    gjahr_kor16_st           TYPE          zmmcorr16-gjahr_kor16_st,
+    monat_kor16_st           TYPE          zmmcorr16-monat_kor16_st,
+  END   OF t_bapi_accdocrevpost_if,
+  tt_bapi_accdocrevpost_if   TYPE STANDARD TABLE OF   t_bapi_accdocrevpost_if  ##needed.
+
+DATA:
+       gs_fcat            TYPE slis_fieldcat_alv    ##NEEDED,
+       gt_fcat            TYPE slis_t_fieldcat_alv  ##NEEDED,
+       gs_layo            TYPE slis_layout_alv      ##NEEDED,
+       gs_sort            TYPE slis_sortinfo_alv    ##NEEDED,
+       gt_sort            TYPE slis_t_sortinfo_alv  ##NEEDED,
+       sy_repid           LIKE sy-repid             ##NEEDED.
+
+TYPES: t_output  TYPE zcl_acc16_write_off_m=>ty_s_outdata,
+       tt_output TYPE zcl_acc16_write_off_m=>ty_t_outdata.
+
+* ------- ALV: Контроли -------------------------
+TYPES:
+  BEGIN OF t_ctrl_kor16,
+    cell_mode(1)             TYPE           c              , " 'C' (Change)/ 'D' (Display)
+    flg_pst_allow            TYPE           boole_d        , " Флаг разрешения создания документов
+    flg_fld_changed          TYPE           boole_d        , " Флаг изменения данных в поле 'STOCK_16_FIN'
+  END   OF t_ctrl_kor16,
+
+  BEGIN OF t_ctrl_alv,
+    r_alv                    TYPE REF TO    cl_gui_alv_grid,
+    r_evthlr                 TYPE REF TO    cl_alv01_hdlr  ,
+    t_fcat                   TYPE           lvc_t_fcat     ,
+    t_fcat*                  TYPE           lvc_t_fcat     ,  " Current
+    t_fcat_lst_dm*           TYPE           lvc_t_fcat     ,  " Lastest state in Display mode
+    s_layo                   TYPE           lvc_s_layo     ,
+    s_layo*                  TYPE           lvc_s_layo     ,
+    t_sort                   TYPE           lvc_t_sort     ,
+    flg_alv_changed          TYPE           boole_d        , "
+    s_kor16                  TYPE           t_ctrl_kor16   , "  контроли управления по KOR16
+  END   OF t_ctrl_alv,
+
+* ------- ALV: Данные ---------------------------
+  BEGIN OF t_data_alv.
+INCLUDE                      TYPE           t_output         .
+INCLUDE                      TYPE           t_alv_fcat_techfld.
+TYPES:
+  END   OF t_data_alv,
+  tt_data_alv                TYPE STANDARD TABLE OF   t_data_alv.
+*
+* ----
+DATA:
+  gt_output                  TYPE           tt_output      ##NEEDED,
+  gs_ctrl_alv                TYPE           t_ctrl_alv     ##NEEDED,
+  gt_data_alv                TYPE           tt_data_alv    ##NEEDED.
+DATA:
+  gs_sort_lvc                TYPE           slis_sortinfo_alv        ##NEEDED,
+  gt_sort_lvc                TYPE           slis_t_sortinfo_alv      ##NEEDED,
+  lv_c_repid                 TYPE           syrepid                  ##NEEDED.
+* ----
+TYPES:
+  gty_t_mseg  TYPE zcl_acc16_write_off_m=>ty_t_mseg .
+
+DATA:  gt_s031  TYPE zcl_acc16_write_off_m=>ty_t_s031   ,
+       gt_t001k TYPE zif_acc16_db_t001k=>ty_t_bwkey     ,
+       gt_bonus TYPE zcl_acc16_write_off_m=>ty_t_bonus  .
+
+TYPES:
+  BEGIN OF gty_s_inforec,
+    matnr LIKE mara-matnr,
+    lifnr LIKE lfa1-lifnr,
+  END OF gty_s_inforec.
+
+DATA: gt_inforec TYPE STANDARD TABLE OF gty_s_inforec.
+
+TYPES: ty_s_lifnr TYPE zmm_acc16_s_lifnr.
+
+DATA:
+  gt_lifnr TYPE zmm_acc16_t_lifnr.
+
+TYPES:
+  ty_s_fidoc_dates TYPE zcl_acc16_write_off_m=>ty_s_fidoc_dates ,
+  ty_t_fidoc_dates TYPE zcl_acc16_write_off_m=>ty_t_fidoc_dates .
+TYPES:
+  ty_s_scr_0110 TYPE zcl_acc16_mult_dates_v=>ty_s_scr_dates.
+
+DATA: gs_scr_0110 TYPE ty_s_scr_0110,
+      gt_zmmcorr16 TYPE STANDARD TABLE OF zmmcorr16   ##NEEDED.
+
+DATA:  gt_return TYPE TABLE OF bapiret2     ##NEEDED.
+
+DATA:
+  gv_c_single_lifnr          TYPE           lfa1-lifnr ##NEEDED.          " Поставщик
+
+* Проверка типов движения в мастер-таблице T156
+TYPES:
+  BEGIN OF t_bwart_shkzg,
+    bwart                    TYPE           bwart,
+    shkzg                    TYPE           shkzg,
+  END   OF t_bwart_shkzg,
+  tt_bwart_shkzg             TYPE STANDARD TABLE OF   t_bwart_shkzg
+                              WITH NON-UNIQUE KEY primary_key COMPONENTS bwart shkzg,
+  BEGIN OF t_chkmvty_data_alv.
+INCLUDE                      TYPE           t_bwart_shkzg     .
+INCLUDE                      TYPE           t_alv_fcat_techfld.
+TYPES:
+  END   OF t_chkmvty_data_alv,
+  tt_chkmvty_data_alv        TYPE STANDARD TABLE OF   t_chkmvty_data_alv
+                              WITH NON-UNIQUE KEY primary_key COMPONENTS bwart shkzg,
+
+  BEGIN OF t_chkmvty_ctrl_alv,
+      r_alvgrid              TYPE REF TO    cl_gui_alv_grid     ,
+      fcat_tabname           TYPE           tabname             ,
+      t_fcat                 TYPE           lvc_t_fcat          ,  " Fieldcatalog
+      s_layo                 TYPE           lvc_s_layo          ,  " Layout
+      s_variant      	        TYPE 	        disvariant          ,  " параметр ФМ is_variant
+      save(1)      	          TYPE 	        c                   ,  " параметр ФМ i_save
+  END   OF t_chkmvty_ctrl_alv.
+
+* ----
+DATA:
+  gv_c_start_allow_flg       TYPE           boole_d   ##NEEDED.          " Флаг разрешения запуска
+DATA:
+  gs_chkmvty_ctrl_alv        TYPE           t_chkmvty_ctrl_alv  ##NEEDED,
+  gt_chkmvty_data_alv        TYPE           tt_chkmvty_data_alv ##NEEDED.
+
+
+
+CLASS lcl_output_collector DEFINITION DEFERRED.
+
+DATA: gx_err      TYPE REF TO zcx_acc16_write_off     ##NEEDED,
+      go_model    TYPE REF TO zcl_acc16_write_off_m   ##NEEDED,
+      go_collect  TYPE REF TO lcl_output_collector    ##NEEDED,
+      go_log      TYPE REF TO zif_app_log             ##NEEDED,
+      go_bl       TYPE REF TO zcl_acc_16_write_off_bl ##NEEDED.
+DATA: g_error(1)                                      ##NEEDED.
+
+TYPES:
+  ty_t_lifnr TYPE zmm_acc16_t_lifnr,
+  ty_t_spmon TYPE zmm_acc16_t_spmon.
+
+DATA: gt_output_lifnr TYPE ty_t_lifnr ,
+      gt_output_spmon TYPE ty_t_spmon . "STANDARD TABLE OF spmon WITH DEFAULT KEY .
+
+CONSTANTS:
+  BEGIN OF gc_flow_control,
+    break   TYPE sy-ucomm VALUE 'BREAK',
+    ask     TYPE sy-ucomm VALUE 'ASK_NEXT_TIME',
+    ignore TYPE sy-ucomm VALUE 'IGNORE',
+   END OF gc_flow_control.
+
+DATA:
+  BEGIN OF gs_scr_0120,
+    break   TYPE flag,
+    ask     TYPE flag,
+    ignore  TYPE flag,
+    ok_code TYPE sy-ucomm,
+  END OF gs_scr_0120,
+  gv_flow_control TYPE sy-ucomm.
