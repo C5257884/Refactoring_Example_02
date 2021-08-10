@@ -1,0 +1,19 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZMM_EXEC_STOCK_V032021_SSC
+*&---------------------------------------------------------------------*
+SELECTION-SCREEN: FUNCTION KEY 1.     " Кнопка проверки видов движения
+
+* -----------------------------------------------
+SELECTION-SCREEN BEGIN OF BLOCK b01 WITH FRAME TITLE text-h01.
+  PARAMETERS: p_bukrs TYPE t001-bukrs DEFAULT '1000' OBLIGATORY.
+  SELECT-OPTIONS: so_spmon FOR zmmcorr16-spmon NO-EXTENSION OBLIGATORY,
+                  so_bwmod FOR t001k-bwmod,
+                  so_lifnr FOR eina-lifnr,
+                  so_matnr FOR mara-matnr.
+  PARAMETERS: p_db RADIOBUTTON GROUP gr1 USER-COMMAND rb_mode,
+              p_save RADIOBUTTON GROUP gr1.
+SELECTION-SCREEN END OF BLOCK b01.
+
+SELECTION-SCREEN BEGIN OF BLOCK b02 WITH FRAME TITLE text-h02.
+  PARAMETERS: p_bchsav  TYPE c AS CHECKBOX DEFAULT '' MODIF ID bch.
+SELECTION-SCREEN END OF BLOCK b02.
