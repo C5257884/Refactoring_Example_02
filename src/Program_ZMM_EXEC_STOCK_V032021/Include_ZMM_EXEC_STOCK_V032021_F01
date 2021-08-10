@@ -1,0 +1,4291 @@
+*&---------------------------------------------------------------------*
+*&  Include           ZMM_EXEC_STOCK_V032021_F01
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+*&      Form  msg_write_bapi
+*&---------------------------------------------------------------------*
+*   Вывод сообщений журнала в LIST при выполнении в фоновом режиме
+*----------------------------------------------------------------------*
+FORM msg_write_bapi_
+  USING     it_api_msg         TYPE           api_msg_list
+  CHANGING  ei_retval          TYPE           i.
+* -----------------------------------------------
+  DATA:
+    ls_bapi_msg              TYPE           bapiret2,
+    lv_s_msgtxt              TYPE           string.
+
+* -----------------------------------------------
+  CHECK sy-batch = 'X'.
+  ei_retval = 0.
+  LOOP AT it_api_msg INTO ls_bapi_msg.
+    MESSAGE ID ls_bapi_msg-id TYPE ls_bapi_msg-type NUMBER ls_bapi_msg-number
+      WITH  ls_bapi_msg-message_v1 ls_bapi_msg-message_v2 ls_bapi_msg-message_v3 ls_bapi_msg-message_v4
+      INTO lv_s_msgtxt.
+    CASE ls_bapi_msg-type.
+      WHEN 'X' OR 'A'.
+        IF ei_retval < 8.   ei_retval = 8. ENDIF.
+        WRITE / '@0A@' AS ICON.
+      WHEN 'E' .
+        IF ei_retval < 4.   ei_retval = 4. ENDIF.
+        WRITE / '@0A@' AS ICON.
+      WHEN 'W' .
+        IF ei_retval < 2.   ei_retval = 2. ENDIF.
+        WRITE / '@09@' AS ICON.
+      WHEN 'I' OR 'S'.
+        IF ei_retval <= 1.  ei_retval = 1. ENDIF.
+        WRITE / '@08@' AS ICON.
+    ENDCASE.
+    WRITE lv_s_msgtxt.
+  ENDLOOP.
+
+ENDFORM.                    "msg_write_bapi
+*---------------------------------------------------------------- Forms
+
+*---------------------------------------------------------------------*
+*      Form  main_selection
+*---------------------------------------------------------------------*
+FORM main_selection RAISING zcx_acc16_write_off.
+  FIELD-SYMBOLS <ls_inforec> LIKE LINE OF gt_inforec[].
+  DATA: l_error(1) ,
+        ls_lifnr TYPE ty_s_lifnr.
+
+  _show_statusbar_message '' 'Поиск данных...'(067).
+
+  CLEAR: gt_output[], gt_t001k, gt_inforec[], gt_lifnr[].
+
+  PERFORM get_t100k USING     p_bukrs
+                              so_bwmod[]
+                    CHANGING  gt_t001k[].
+
+  CASE abap_true.
+    WHEN p_db.    " Созданиее нового распределения
+      PERFORM create_new_write_off CHANGING l_error.
+    WHEN p_save.  " Считывание сохраненного распределения
+      PERFORM read_existing_write_off.
+  ENDCASE.
+
+  DELETE: gt_output WHERE lifnr NOT IN so_lifnr,
+          gt_output_lifnr[] WHERE lifnr NOT IN so_lifnr.
+
+  IF lines( gt_output[] ) = 0.
+    MESSAGE s024(zmm2) WITH 'Не было выбрано данных'(069).
+    STOP.
+  ENDIF.
+
+  SORT gt_inforec[].
+  LOOP AT gt_inforec ASSIGNING <ls_inforec>.
+    ls_lifnr-lifnr = <ls_inforec>-lifnr.
+    COLLECT ls_lifnr INTO gt_lifnr[].
+  ENDLOOP.
+
+  "-- заполняем: тексты материала, поставщика,
+  "   группировки по LIFNR, SPMON
+  PERFORM set_texts_and_groups CHANGING gt_output[].
+  "--  Обновление данных в GT_OUTPUT[]
+  PERFORM set_info_status.
+
+ENDFORM.                    " main_selection
+
+*&---------------------------------------------------------------------*
+*&      Form  PF_STATUS_SET
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM pf_status_set  USING pt_extab TYPE kkblo_t_extab  ##CALLED.
+
+*------------------------------------------------
+* Получение ссылки на объект ALV
+  IF gs_ctrl_alv-r_alv IS INITIAL.
+    CALL FUNCTION 'GET_GLOBALS_FROM_SLVC_FULLSCR'
+      IMPORTING
+        e_grid = gs_ctrl_alv-r_alv.
+
+    IF gs_ctrl_alv-r_evthlr IS INITIAL AND NOT gs_ctrl_alv-r_alv IS INITIAL.
+      CREATE OBJECT gs_ctrl_alv-r_evthlr.
+* SET Handler for ALV Events
+      SET HANDLER:       " ALV11 для режима формирования ГМ с остатками
+             gs_ctrl_alv-r_evthlr->ehalv_cntxtmnureq FOR gs_ctrl_alv-r_alv,
+             gs_ctrl_alv-r_evthlr->ehalv_dblclick    FOR gs_ctrl_alv-r_alv,
+             gs_ctrl_alv-r_evthlr->ehalv_ucomm       FOR gs_ctrl_alv-r_alv,
+             gs_ctrl_alv-r_evthlr->ehalv_tbar        FOR gs_ctrl_alv-r_alv,
+             gs_ctrl_alv-r_evthlr->ehalv_tpage       FOR gs_ctrl_alv-r_alv,
+             gs_ctrl_alv-r_evthlr->ehalv_btnclck     FOR gs_ctrl_alv-r_alv,
+             gs_ctrl_alv-r_evthlr->ehalv_hsptclck    FOR gs_ctrl_alv-r_alv,
+             gs_ctrl_alv-r_evthlr->ehalv_dtachg      FOR gs_ctrl_alv-r_alv,
+             gs_ctrl_alv-r_evthlr->ehalv_dtachgfin   FOR gs_ctrl_alv-r_alv.
+    ENDIF.
+
+    " событие handle_data_changed и handle_top_of_page будут генерироваться при изменении содержимого ячейки
+    gs_ctrl_alv-r_alv->register_edit_event( i_event_id = cl_gui_alv_grid=>mc_evt_modified ).
+    " событие handle_top_of_page будет гененрироваться при нажатии Enter
+    gs_ctrl_alv-r_alv->register_edit_event( i_event_id = cl_gui_alv_grid=>mc_evt_enter ).
+  ENDIF.
+
+* При нажатии на Изм/Просм.Корр16 - смена режима ALV
+  DO 1 TIMES.
+    CHECK NOT gs_ctrl_alv-r_alv IS INITIAL.
+    CHECK sy-ucomm = cc_fc_chgkor16.
+
+    PERFORM trgr_alv_kor16_mode
+      CHANGING  gs_ctrl_alv.
+  ENDDO.
+
+* ----
+*  Вывод Кнопок отв.за проводку в зависимости от условий
+* -- Если НЕ единствкнный поставщик - кнопки недоступны
+*  Вывод Кнопок семейства *Kорр16 в зависимости от условий
+  CASE abap_true.
+    WHEN p_db.
+      APPEND:
+        cc_fc_chgkor16  TO pt_extab,
+        cc_fc_savkor16  TO pt_extab,
+        cc_fc_postkor16 TO pt_extab.
+      APPEND cc_fc_strnkor16 TO pt_extab.                     " -- Кнопка 'Сторно Док.корр.16'
+      APPEND cc_fc_delwopost TO pt_extab.                     " -- Кнопка 'Удаление записи без проводок'
+
+    WHEN p_save.
+      IF gs_ctrl_alv-s_kor16-cell_mode = cc_cell_mode_chg.          " (C)hange  [cc_cell_mode_chg]
+        APPEND  cc_fc_postkor16 TO pt_extab.                  " -- Кнопка Post Korr16 - НЕ активна
+        APPEND cc_fc_strnkor16 TO pt_extab.                   " -- Кнопка 'Сторно Док.корр.16'
+
+        IF  gs_ctrl_alv-s_kor16-flg_fld_changed = abap_false. " Данные в поле ALV STOCK_16_FIN НЕ измененялись
+          APPEND cc_fc_savkor16 TO pt_extab.                  " -- Кнопка Save Korr16 - НЕ актина
+        ENDIF.
+
+      ELSE.                                                         " (D)isplay [cc_cell_mode_dsp]
+        APPEND cc_fc_savkor16 TO pt_extab.                    " -- Кнопка Save Korr16 - НЕ актина
+
+        IF gs_ctrl_alv-s_kor16-flg_pst_allow = abap_false.    " не было сохранения значений поля STOCK_16_FIN
+          APPEND  cc_fc_postkor16 TO pt_extab.                " -- Кнопка Post Korr16 - НЕ активна
+        ENDIF.
+      ENDIF.
+  ENDCASE.
+
+  IF p_save = 'X'.
+    APPEND 'SAVE' TO pt_extab.
+  ENDIF.
+  SET PF-STATUS 'MAIN' EXCLUDING pt_extab.
+
+ENDFORM.                    "PF_STATUS_SET
+
+*---------------------------------------------------------------------*
+*      Form  user_command
+*---------------------------------------------------------------------*
+FORM user_command                  ##CALLED
+  USING
+    p_comm                   TYPE           c
+    p_wa                     TYPE           slis_selfield.
+
+* -----------------------------------------------
+  DATA:
+    lv_c_refresh_alv TYPE boole_d   ,
+    ls_stable        TYPE lvc_s_stbl,
+    ls_output        TYPE t_output ,
+    l_answer(1).
+* -----------------------------------------------
+* Синхронизация табл.ALV -> табл.OUT
+  PERFORM convtb_alv2out
+    USING     gt_data_alv
+    CHANGING  gt_output[].
+
+  DO 1 TIMES.
+    IF p_comm = '&IC1'.
+      READ TABLE gt_output[] INTO ls_output INDEX p_wa-tabindex.
+
+      CASE p_wa-fieldname.
+        WHEN 'VBELN'.
+          SET PARAMETER ID 'VF' FIELD p_wa-value.
+          CALL TRANSACTION 'VF03' AND SKIP FIRST SCREEN.
+        WHEN 'BELNR_FI' OR
+             'GJAHR_FI'.
+          SET PARAMETER ID:
+            'BUK' FIELD p_bukrs           ,
+            'BLN' FIELD ls_output-belnr_fi,
+            'GJR' FIELD ls_output-gjahr_fi.
+          CALL TRANSACTION 'FB03' AND SKIP FIRST SCREEN.
+
+        WHEN 'BELNR_ST' OR
+             'GJAHR_ST' OR 'MONAT_ST'.
+          SET PARAMETER ID:
+            'BUK' FIELD p_bukrs,
+            'BLN' FIELD ls_output-belnr_st,
+            'GJR' FIELD ls_output-gjahr_st.
+          CALL TRANSACTION 'FB03' AND SKIP FIRST SCREEN.
+
+        WHEN 'BELNR_KOR16' OR
+             'GJAHR_KOR16' OR 'MONAT_KOR16'.
+          SET PARAMETER ID:
+            'BUK' FIELD p_bukrs              ,
+            'BLN' FIELD ls_output-belnr_kor16,
+            'GJR' FIELD ls_output-gjahr_kor16.
+          CALL TRANSACTION 'FB03' AND SKIP FIRST SCREEN.
+
+        WHEN 'BELNR_KOR16_ST' OR
+             'GJAHR_KOR16_ST'.
+          SET PARAMETER ID:
+            'BUK' FIELD p_bukrs                 ,
+            'BLN' FIELD ls_output-belnr_kor16_st,
+            'GJR' FIELD ls_output-gjahr_kor16_st.
+          CALL TRANSACTION 'FB03' AND SKIP FIRST SCREEN.
+      ENDCASE.
+
+    ELSEIF p_comm = 'SAVE'.
+      PERFORM ucomm_save.
+
+    ELSEIF p_comm = 'PRINT_REP'.
+      PERFORM output_excel.
+
+* -----------------------------------------------
+*  Переключение между режимом Display/ Change (STOCK_16_FIN)
+* -----------------------------------------------
+    ELSEIF p_comm = cc_fc_chgkor16.
+      CASE gs_ctrl_alv-s_kor16-cell_mode.
+        WHEN cc_cell_mode_chg.                          " (C)hange [Change -> Display]
+          gs_ctrl_alv-s_kor16-cell_mode = cc_cell_mode_dsp.
+
+        WHEN OTHERS.                                    " (D)isplay [Display -> Change]
+* -- сохранение последнего Field Catalog при смене режима Display -> Change
+*    (для восcтановления режимов [колонки суммир., ...] для обраб-ки при обратном переключении в Display mode)
+          gs_ctrl_alv-r_alv->get_frontend_fieldcatalog(
+            IMPORTING et_fieldcatalog = gs_ctrl_alv-t_fcat_lst_dm* ).
+
+          gs_ctrl_alv-s_kor16-cell_mode = cc_cell_mode_chg.
+      ENDCASE.
+
+* -----------------------------------------------
+* Изменение значений поля 'STOCK_16_FIN_KOR'
+* -----------------------------------------------
+    ELSEIF p_comm = 'SAVE_KOR16'.
+      IF  gs_ctrl_alv-s_kor16-flg_fld_changed = abap_false.    " проверка флага: Данные изменены
+        MESSAGE text-m05          " 'Сохранение ручных корректировок исходящего сальдо по сч.16 НЕ требуется'
+          TYPE 'I' DISPLAY LIKE 'W'.
+        EXIT.
+      ENDIF.
+
+      _call_popup_dialog 'Предупреждение'(050) 'Сохранить ручные значения корректировок исходящего сальдо по сч.16?'(066)
+        'Да'(052) 'Нет'(053) '2' '' l_answer.
+      CHECK l_answer = '1'.
+
+      PERFORM save_kor16_val
+        USING     gt_output[]
+                  abap_true                 " Commit - Yes
+                  abap_false                " All types messages are journalied - No (only W,E and higher)
+        CHANGING  g_error
+                  gt_return[].
+      IF lines( gt_return[] ) > 0.
+        PERFORM msg_show_bapi USING gt_return[].
+      ENDIF.
+      IF g_error = abap_true.
+        MESSAGE text-m01          " 'Ошибки при сохранении ручных корректировок исходящего сальдо по сч.16'
+          TYPE 'S' DISPLAY LIKE 'E'.
+        EXIT.
+      ELSE.
+        gs_ctrl_alv-s_kor16-flg_fld_changed = abap_false.    " сброс флага: Данные изменены
+        gs_ctrl_alv-s_kor16-flg_pst_allow   = abap_true.     " установка флага: разрешено создание док-тов KOR16
+        MESSAGE text-m02          " 'Значения ручных корректировок исходящего сальдо по сч.16 успешно сохранены'
+          TYPE 'S'.
+      ENDIF.
+
+      lv_c_refresh_alv = abap_true.
+
+      "-----------------------------------------------
+      " FI-post
+      "-----------------------------------------------
+    ELSEIF p_comm = 'POST' OR p_comm = 'STORNO' OR
+           p_comm = cc_fc_postkor16 OR p_comm = cc_fc_strnkor16.
+
+      go_log->refresh( ).
+
+      CASE p_comm.
+        WHEN 'POST'.
+          PERFORM ucomm_post      CHANGING p_wa-refresh.
+        WHEN 'STORNO'.
+          PERFORM ucomm_storno    CHANGING p_wa-refresh.
+        WHEN cc_fc_postkor16.
+          " Создание документов по значениям из 'STOCK_16_FIN_KOR'
+          PERFORM ucomm_postkor16 CHANGING p_wa-refresh.
+        WHEN cc_fc_strnkor16.
+          " Сторно документов по корректировке (STOCK_16_FIN)
+          IF gs_ctrl_alv-s_kor16-cell_mode = cc_cell_mode_chg.     " (C)hange [Change -> Display]
+            RETURN.
+          ENDIF.
+          PERFORM ucomm_strnkor16 CHANGING p_wa-refresh.
+      ENDCASE.
+
+      lv_c_refresh_alv = p_wa-refresh.
+* ----
+    ELSEIF p_comm = cc_fc_delwopost.        " удаление записей без проводок
+      PERFORM delete_calc_wo_posting CHANGING p_wa.
+      lv_c_refresh_alv = p_wa-refresh.
+    ENDIF.
+  ENDDO.
+
+* ----
+* Синхронизация табл.ALV -> табл.OUT
+  PERFORM convtb_out2alv USING     gt_output[]
+                                   gs_ctrl_alv
+                         CHANGING  gt_data_alv.
+
+  IF lv_c_refresh_alv = abap_true.
+* -- Refresh table Display
+    ls_stable-row = ls_stable-col = abap_true.
+    gs_ctrl_alv-r_alv->refresh_table_display(
+                          EXPORTING  is_stable      = ls_stable
+                          EXCEPTIONS OTHERS         = 0 ).
+  ENDIF.
+
+ENDFORM.                    "user_command
+
+*---------------------------------------------------------------------*
+*      Form  SAVE_DATA
+*---------------------------------------------------------------------*
+FORM save_data USING    p_commit      TYPE boole_d
+               CHANGING p_error       TYPE boole_d.
+
+  DATA:  lt_zmmcorr16 TYPE TABLE OF zmmcorr16,
+         l_stroka(150) ,
+         l_answer(1)   ,
+         ls_lifnr TYPE ty_s_lifnr.
+  FIELD-SYMBOLS:
+    <ls_zmmcorr16>    LIKE LINE OF lt_zmmcorr16[],
+    <ls_output>       LIKE LINE OF gt_output[].
+
+  CLEAR: p_error.
+
+  IF so_matnr[] IS NOT INITIAL.
+    p_error = 'X'.
+    MESSAGE s137(zmm2) INTO sy-msgli.
+    _add_bapi_message gt_return 'E' '137' 'ZMM2' '' '' '' ''. " ERP-53 MM: Ошибка при сохранении отчета - 1
+    RETURN.
+  ENDIF.
+
+  "---------------------------
+  lt_zmmcorr16[] =
+    go_model->db_read_corr16_curr_mnth( it_lifnr = gt_output_lifnr[] ).
+
+  LOOP AT lt_zmmcorr16 ASSIGNING <ls_zmmcorr16> WHERE belnr_fi <> ''
+                                                  AND belnr_st = ''.
+    EXIT.
+  ENDLOOP.
+
+  IF sy-subrc = 0.
+    " В периоде & по поставщику & уже произведен расчет ретрокоррекции
+    MESSAGE e138(zmm2) WITH <ls_zmmcorr16>-spmon ls_lifnr-lifnr INTO sy-msgli.
+    _add_bapi_message gt_return 'E' '138' 'ZMM2' <ls_zmmcorr16>-spmon <ls_zmmcorr16>-lifnr '' ''.
+    p_error = 'X'.
+    RETURN.
+  ENDIF.
+
+  IF sy-batch = space.
+    LOOP AT lt_zmmcorr16 ASSIGNING <ls_zmmcorr16> WHERE belnr_fi <> '' AND belnr_st <> ''
+                                                     OR belnr_fi =  '' AND belnr_st = ''.
+      EXIT.
+    ENDLOOP.
+
+    IF sy-subrc = 0.
+      CONCATENATE 'За период'(071) <ls_zmmcorr16>-spmon 'по поставщику'(118) ls_lifnr-lifnr
+        'существует временно сохраненный или отсторнированный отчет.'(072) 'Заменить его?'(073)
+        INTO l_stroka SEPARATED BY space.
+      _call_popup_dialog 'Предупреждение'(050) l_stroka 'Да'(052) 'Нет'(053) '2' '' l_answer.
+      IF l_answer <> '1'.
+        RETURN.
+      ENDIF.
+    ENDIF.
+  ENDIF.
+  "---------------------------
+
+  "--------------- Сохранение --------------------
+  CLEAR: zmmcorr16, lt_zmmcorr16[].
+
+  LOOP AT gt_output ASSIGNING <ls_output>.
+
+    MOVE-CORRESPONDING <ls_output> TO zmmcorr16.            "#EC ENHOK
+    zmmcorr16-mandt = sy-mandt.
+    zmmcorr16-bukrs = p_bukrs.
+    APPEND  zmmcorr16 TO lt_zmmcorr16.
+
+    DELETE FROM zmmcorr16
+      WHERE bukrs = p_bukrs
+        AND spmon = <ls_output>-spmon
+        AND matnr = <ls_output>-matnr
+        AND lifnr = <ls_output>-lifnr.
+  ENDLOOP.
+
+  INSERT zmmcorr16 FROM TABLE lt_zmmcorr16[].
+
+  IF sy-subrc <> 0.
+    MESSAGE a135.
+    RETURN.
+  ELSE.
+    MESSAGE s151(zmm2) WITH so_spmon-low so_spmon-high INTO sy-msgli.
+    _add_bapi_message gt_return 'S' '151' 'ZMM2' so_spmon-low so_spmon-high '' ''.
+  ENDIF.
+
+  IF p_commit = abap_true.
+    COMMIT WORK AND WAIT.
+  ENDIF.
+
+ENDFORM.                    " SAVE_DATA
+
+*---------------------------------------------------------------------*
+*      Form  POST_DATA
+*---------------------------------------------------------------------*
+FORM post_data USING    iv_lifnr    TYPE lfa1-lifnr
+                        iv_spmon    TYPE spmon
+               RAISING  zcx_acc16_write_off.
+
+
+  FIELD-SYMBOLS <ls_output> LIKE LINE OF gt_output[].
+  DATA: lt_bonus          LIKE gt_bonus[] ,
+        ls_header         TYPE  bapiache09,
+        lt_accountgl      LIKE TABLE OF bapiacgl09,
+        lt_currencyamount LIKE TABLE OF bapiaccr09,
+        lt_bapiret2       TYPE bapiret2_tab,
+        obj_key           TYPE bapiacrev-obj_key,
+        lx_bapi           TYPE REF TO zcx_acc16_write_off_bapi .
+  DATA  lv_c_lifnr TYPE lfa1-lifnr.
+
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+    EXPORTING
+      input  = iv_lifnr
+    IMPORTING
+      output = lv_c_lifnr.
+
+  " Чтение информации о бонусах по материалам
+  lt_bonus[] = go_model->db_read_bonus_01( ).
+
+  DELETE lt_bonus[] WHERE gjahr > iv_spmon(4).
+  DELETE lt_bonus[] WHERE gjahr = iv_spmon(4) AND monat > iv_spmon+4(2).
+  SORT lt_bonus BY gjahr DESCENDING monat DESCENDING matnr.
+
+  " Подготовка данных для проводок FI
+  ls_header-neg_postng  = 'X'.
+  ls_header-username    = sy-uname.
+  ls_header-bus_act     = 'RFBU'.
+  ls_header-comp_code   = p_bukrs.
+  ls_header-doc_date    = gs_scr_0110-bldat.
+  ls_header-pstng_date  = gs_scr_0110-budat.
+  ls_header-ref_doc_no  = lv_c_lifnr.
+  ls_header-header_txt  = |{ 'Ретрокорр.'(117) } { iv_spmon+4(2) }.{ iv_spmon(4) }|.
+  ls_header-doc_type    = 'AB'.
+
+  CLEAR: lt_accountgl[], lt_currencyamount[].
+
+  LOOP AT gt_output ASSIGNING <ls_output> WHERE lifnr = iv_lifnr
+                                            AND spmon = iv_spmon.
+
+    PERFORM fill_bapi_acc_doc_items TABLES lt_accountgl lt_currencyamount lt_bonus
+                                    USING '9002010000' <ls_output>.
+    PERFORM fill_bapi_acc_doc_items TABLES lt_accountgl lt_currencyamount lt_bonus
+                                    USING '9002020000' <ls_output>.
+    PERFORM fill_bapi_acc_doc_items TABLES lt_accountgl lt_currencyamount lt_bonus
+                                    USING '9102010000' <ls_output>.
+    PERFORM fill_bapi_acc_doc_items TABLES lt_accountgl lt_currencyamount lt_bonus
+                                    USING '9408000000' <ls_output>.
+  ENDLOOP.
+
+  IF lt_accountgl[] IS INITIAL.
+    MESSAGE w147(zmm2) WITH iv_lifnr iv_spmon INTO sy-msgli.
+    go_log->add_symsg( ).
+    RETURN.
+  ENDIF.
+
+  TRY .
+      go_bl->bapi_acc_document_post(                      " CALL FUNCTION 'BAPI_ACC_DOCUMENT_POST'
+        EXPORTING is_documentheader = ls_header
+        IMPORTING obj_key           = obj_key
+        CHANGING  ct_accountgl      = lt_accountgl
+                  ct_currencyamount = lt_currencyamount
+                  ct_return         = lt_bapiret2 ).
+
+      go_log->add_bapiret2_tab( lt_bapiret2[] ).
+
+      LOOP AT gt_output ASSIGNING <ls_output> WHERE lifnr = iv_lifnr
+                                                AND spmon = iv_spmon.
+        <ls_output>-belnr_fi = obj_key(10).
+        <ls_output>-gjahr_fi = obj_key+14(4).
+
+        CLEAR:  <ls_output>-belnr_st        , <ls_output>-gjahr_st      ,
+                <ls_output>-belnr_kor16     , <ls_output>-gjahr_kor16   ,
+                <ls_output>-belnr_kor16_st  , <ls_output>-gjahr_kor16_st,
+                <ls_output>-monat_st        , <ls_output>-monat_kor16   ,
+                <ls_output>-stock_16_fin_kor, <ls_output>-monat_kor16_st.
+
+        " Обновление ZMMCORR16-BELNR_FI/GJAHR_FI/BELNR_ST/GJAHR_ST/MONAT_ST
+        TRY .
+            go_model->db_upd_corr16_after_fi_post( <ls_output> ).
+          CATCH zcx_acc16_write_off.
+            go_model->db_upd_corr16_after_fi_post( <ls_output> ).
+        ENDTRY.
+        " Сохранение истории
+        go_model->save_history( i_mode = zcl_acc16_write_off_m=>cs_hist_mode-post  is_data = <ls_output> ).
+      ENDLOOP.
+
+      go_bl->bapi_commit( abap_true ).
+      MESSAGE s142 WITH <ls_output>-belnr_fi INTO sy-msgli.
+      go_log->add_symsg( ).
+
+    CATCH zcx_acc16_write_off_bapi INTO lx_bapi.
+      go_bl->bapi_rollback( ).
+      go_log->add_bapiret2_tab( lx_bapi->t_bapiret2[] ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+    CATCH zcx_acc16_write_off.
+      " Ошибка при сохранении истории
+      go_bl->bapi_rollback( ).
+      MESSAGE e106(zmm) WITH text-004 text-006 text-007 space INTO sy-msgli.
+      go_log->add_symsg( ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+  ENDTRY.
+
+ENDFORM.                    " POST_DATA
+
+*---------------------------------------------------------------------*
+*      Form  FILL_BAPI_ACC_DOC_ITEMS
+*---------------------------------------------------------------------*
+FORM fill_bapi_acc_doc_items TABLES   pt_accountgl      STRUCTURE bapiacgl09
+                                      pt_currencyamount STRUCTURE bapiaccr09
+                                      pt_bonus          LIKE gt_bonus
+                             USING    p_hkont           TYPE hkont
+                                      ps_output         LIKE LINE OF gt_output[]
+                             RAISING  zcx_acc16_write_off.
+
+  DATA: ls_accountgl      LIKE  bapiacgl09,
+        ls_currencyamount LIKE bapiaccr09 .
+  FIELD-SYMBOLS <ls_bonus> LIKE LINE OF pt_bonus[].
+
+
+  CLEAR: ls_accountgl, ls_accountgl.
+
+  IF p_hkont = '9002010000'.
+    ls_currencyamount-amt_doccur = ps_output-w_gi_900201_16.
+  ELSEIF p_hkont = '9002020000'.
+    ls_currencyamount-amt_doccur = ps_output-w_gi_900202_16.
+    ls_accountgl-tax_code = 'K0'.                             " RT0K911559.SAPERP-225
+  ELSEIF p_hkont = '9102010000'.
+    ls_currencyamount-amt_doccur = ps_output-w_gi_9102_16.
+  ELSEIF p_hkont = '9408000000'.
+    ls_currencyamount-amt_doccur = ps_output-w_gi_94_16.
+  ENDIF.
+
+  IF ls_currencyamount-amt_doccur IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  ls_accountgl-itemno_acc = lines( pt_accountgl ) + 1.
+  ls_accountgl-comp_code = p_bukrs.
+
+  READ TABLE pt_bonus ASSIGNING <ls_bonus> WITH KEY matnr = ps_output-matnr.
+  IF sy-subrc <> 0.
+*    MESSAGE a135.
+    MESSAGE e006(zmm_acc16_write_off) WITH ps_output-matnr INTO sy-msgli.
+    go_log->add_symsg( ).
+    RAISE EXCEPTION TYPE zcx_acc16_write_off
+      EXPORTING
+        textid = zcx_acc16_write_off=>bonus_for_matnr_not_found
+        msgv1  = |{ ps_output-matnr }|.
+  ENDIF.
+  ls_accountgl-gl_account = <ls_bonus>-hkont.
+  ls_accountgl-material = ps_output-matnr.
+  ls_accountgl-plant = 'Z500'.
+  APPEND ls_accountgl TO pt_accountgl.
+  ls_currencyamount-itemno_acc = ls_accountgl-itemno_acc.
+  ls_currencyamount-curr_type = '00'.
+  ps_output-waers = 'RUB'.
+  ls_currencyamount-currency = ps_output-waers.
+  APPEND ls_currencyamount TO pt_currencyamount.
+
+  ls_accountgl-itemno_acc = lines( pt_accountgl ) + 1.
+  ls_accountgl-comp_code = p_bukrs.
+  ls_accountgl-gl_account = p_hkont.
+  ls_accountgl-material = ps_output-matnr.
+  ls_accountgl-plant = 'Z500'.
+  APPEND ls_accountgl TO pt_accountgl.
+  ls_currencyamount-itemno_acc = ls_accountgl-itemno_acc.
+  ls_currencyamount-curr_type = '00'.
+  ls_currencyamount-currency = ps_output-waers.
+  ls_currencyamount-amt_doccur = - ls_currencyamount-amt_doccur.
+  APPEND ls_currencyamount TO pt_currencyamount.
+
+ENDFORM.                    " FILL_BAPI_ACC_DOC_ITEMS
+
+*---------------------------------------------------------------------*
+*      Form  CANCEL_POSTING
+*---------------------------------------------------------------------*
+*  Использвание глобальных переменных
+*  - gs_ctrl_alv-r_alv...
+*  - <...>
+*
+*  Измененение глобальных переменных
+*  - <...>
+*
+* -----------------------------------------------
+FORM cancel_posting USING    is_belnr TYPE zcl_acc16_write_off_m=>ty_s_fidoc
+                    RAISING  zcx_acc16_write_off.
+
+  DATA: lt_return     LIKE TABLE OF bapiret2,
+        rev_key       LIKE  bapiacrev,
+        ls_header     LIKE  bapiache09,
+        lx_err_bapi   TYPE REF TO zcx_acc16_write_off_bapi,
+        obj_key       TYPE bapiacrev-obj_key.
+  FIELD-SYMBOLS:
+    <ls_output> LIKE LINE OF gt_output[].
+  "-----------------------------------------------
+
+  CLEAR: lt_return[].
+
+  CONCATENATE: is_belnr-belnr is_belnr-bukrs is_belnr-gjahr INTO rev_key-obj_key   ,
+               is_belnr-belnr is_belnr-bukrs is_belnr-gjahr INTO rev_key-obj_key_r .
+  rev_key-obj_type    = 'BKPFF'.
+  rev_key-pstng_date  = gs_scr_0110-budat.
+  rev_key-reason_rev  = gs_scr_0110-stgrd.
+  ls_header-bus_act   = 'RFBU'.
+
+  TRY .
+      go_bl->bapi_acc_document_rev_post(
+          EXPORTING is_reversal  = rev_key
+                    iv_bus_act   = ls_header-bus_act
+          IMPORTING obj_key      = obj_key
+          CHANGING  ct_return    = lt_return[] ).
+
+      go_log->add_bapiret2_tab( lt_return[] ).
+
+      LOOP AT gt_output ASSIGNING <ls_output> WHERE belnr_fi = is_belnr-belnr.
+        <ls_output>-belnr_st = obj_key(10).
+        <ls_output>-gjahr_st = obj_key+14(4).
+        <ls_output>-monat_st = rev_key-pstng_date+4(2).
+      ENDLOOP.
+
+      " Обновление полей "ZMMCORR16-BELNR_ST/GJAHR_ST/MONAT_ST
+      go_model->db_upd_corr16_after_fi_rvrs( <ls_output> ).
+
+      "-- Сохранение истории
+      go_model->save_history( i_mode  = zcl_acc16_write_off_m=>cs_hist_mode-storno
+                              is_data = <ls_output> ).
+      " COMMIT
+      go_bl->bapi_commit( abap_true ).
+      MESSAGE s142 WITH <ls_output>-belnr_fi.
+
+    CATCH zcx_acc16_write_off_bapi INTO lx_err_bapi.
+      go_bl->bapi_rollback( ).
+      go_log->add_bapiret2_tab( lx_err_bapi->t_bapiret2[] ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+    CATCH zcx_acc16_write_off.
+      go_bl->bapi_rollback( ).
+      MESSAGE e106(zmm) WITH text-004 text-006 text-007 space INTO sy-msgli.
+      go_log->add_symsg( ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+  ENDTRY.
+
+ENDFORM.                    " CANCEL_POSTING
+
+*---------------------------------------------------------------------*
+*      Module  STATUS_0110  OUTPUT
+*---------------------------------------------------------------------*
+MODULE status_0110 OUTPUT.
+
+  SET PF-STATUS 'GUI_0110'.
+*  SET TITLEBAR 'xxx'.
+
+  LOOP AT SCREEN.
+    IF screen-name CS 'LIFNR' AND gs_scr_0110-mode = '2'
+    OR screen-name CS 'BELNR' AND gs_scr_0110-mode = '1'.
+      screen-active = 0.
+    ENDIF.
+    MODIFY SCREEN.
+  ENDLOOP.
+
+  LOOP AT SCREEN.
+    CASE screen-name.
+      WHEN 'GS_SCR_0110-LIFNR'.
+        IF gs_scr_0110-fl_wo_lifnr = abap_true.
+          screen-input      = '0'.
+          screen-output     = '0'.
+          screen-invisible  = '1'.
+        ELSE.
+          IF gv_c_single_lifnr IS INITIAL.
+            screen-input  = '0'.
+            screen-output = '1'.
+          ELSE.
+            screen-input  = '0'.
+            screen-output = '1'.
+          ENDIF.
+        ENDIF.
+      WHEN 'GS_SCR_0110-STGRD'.
+        CASE gs_scr_0110-run_mode.
+          WHEN 'POST'  .
+            screen-active   = '0'.
+            screen-required = '0'.
+          WHEN 'STORNO'.
+            screen-active   = '1'.
+            screen-required = '1'.
+        ENDCASE.
+      WHEN OTHERS  .
+        CONTINUE.
+    ENDCASE.
+    MODIFY SCREEN.
+  ENDLOOP.
+
+ENDMODULE.                 " STATUS_0110  OUTPUT
+
+*----------------------------------------------------------------------*
+*  MODULE pbo_0110 OUTPUT
+*----------------------------------------------------------------------*
+*
+*----------------------------------------------------------------------*
+MODULE pbo_0110 OUTPUT.
+  gs_scr_0110-spmon_txt = |{ gs_scr_0110-spmon+4(2) }.{ gs_scr_0110-spmon(4) }|.
+ENDMODULE.                    "pbo_0110 OUTPUT
+
+*&---------------------------------------------------------------------*
+*&      Form  output_excel
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM output_excel.
+*  DATA lv_output_xml TYPE xstring.
+*
+*  CALL TRANSFORMATION zcorr_16_trans
+*    SOURCE
+*      it_spmon  = gt_output_spmon[]
+*      it_lifnr  = gt_output_lifnr[]
+*      it_output = gt_output[]
+*    RESULT XML lv_output_xml.
+*
+*  RETURN.
+
+  CONSTANTS: c_excelform TYPE wwwdatatab-objid VALUE 'ZCORR_16'.
+  DATA:  gv_valuechar(255),
+         l_tabix LIKE sy-tabix,
+         gt_val TYPE STANDARD TABLE OF zwww_values,
+         gs_val LIKE LINE OF gt_val ,
+         l_stroka(150) .
+  DATA:  ls_output LIKE LINE OF gt_output[].
+
+  DEFINE setval.
+    clear gs_val.
+    gs_val-var_name  = &1.
+    gs_val-var_num   = &2.
+    gs_val-find_text = &3.
+    gs_val-val_type  = &4.
+    write &5 to gv_valuechar no-grouping left-justified ##UOM_IN_MES.
+    gs_val-value = gv_valuechar.
+    append gs_val to gt_val.
+  END-OF-DEFINITION.
+
+  CONCATENATE so_spmon-low+4(2) '.' so_spmon-low(4) INTO l_stroka.
+
+  CONCATENATE 'РАСЧЕТ СПИСАНИЯ СЧЕТА 16 за'(070) l_stroka INTO l_stroka SEPARATED BY space.
+  setval '' '' '[SPMON]' '' l_stroka.
+
+  TABLES: user_addr.
+
+  SELECT SINGLE *                                           "#EC WARNOK
+    FROM user_addr
+   WHERE bname = sy-uname.
+
+  setval '' '' '[FIO]' ''  user_addr-name_textc.
+
+  LOOP AT gt_output INTO ls_output.
+    l_tabix = sy-tabix.
+    setval 'stroka' l_tabix '[MATNR]'           '' ls_output-matnr                    ##NO_TEXT.
+    setval 'stroka' l_tabix '[MAKTX]'           '' ls_output-maktx                    ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_STOCK_41]'      '' ls_output-w_stock_41               ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GRS_41]'        '' ls_output-w_grs_41                 ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GRO_41]'        '' ls_output-w_gro_41                 ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_STOCK_16]'      '' ls_output-w_stock_16               ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GR_16]'         '' ls_output-w_gr_16                  ##NO_TEXT.
+    setval 'stroka' l_tabix '[KOEF]'            '' ls_output-koef_out                 ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_9002]'       '' ls_output-w_gi_9002                ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_900201]'     '' ls_output-w_gi_900201              ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_900202]'     '' ls_output-w_gi_900202              ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_9102]'       '' ls_output-w_gi_9102                ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_94]'         '' ls_output-w_gi_94                  ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_9002_16]'    '' ls_output-w_gi_9002_16             ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_900201_16]'  '' ls_output-w_gi_900201_16           ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_900202_16]'  '' ls_output-w_gi_900202_16           ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_9102_16]'    '' ls_output-w_gi_9102_16             ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_GI_94_16]'      '' ls_output-w_gi_94_16               ##NO_TEXT.
+    setval 'stroka' l_tabix '[W_STOCK_16_FIN]'  '' ls_output-w_stock_16_fin           ##NO_TEXT.
+    AT LAST.
+      SUM.
+      setval '' '' '[TOT_W_GI_900201]'          '' ls_output-w_gi_900201  .
+      setval '' '' '[TOT_W_GI_900202]'          '' ls_output-w_gi_900202  .
+      setval '' '' '[TOT_W_GI_9102]'            '' ls_output-w_gi_9102    .
+      setval '' '' '[TOT_W_GI_94]'              '' ls_output-w_gi_94      .
+      setval '' '' '[TOT_W_GI_900201_16]'       '' ls_output-w_gi_900201_16.
+      setval '' '' '[TOT_W_GI_900202_16]'       '' ls_output-w_gi_900202_16.
+      setval '' '' '[TOT_W_GI_9102_16]'         '' ls_output-w_gi_9102_16  .
+      setval '' '' '[TOT_W_GI_94_16]'           '' ls_output-w_gi_94_16    .
+      setval '' '' '[TOT_W_STOCK_16_FIN]'       '' ls_output-w_stock_16_fin.
+    ENDAT.
+  ENDLOOP.
+
+  CALL FUNCTION 'ZWWW_OPENFORM'
+    EXPORTING
+      form_name   = c_excelform
+      printdialog = ''
+      protect     = ''
+      optimize    = 999999
+    TABLES
+      it_values   = gt_val
+    EXCEPTIONS
+      printcancel = 1
+      OTHERS      = 99.
+  IF sy-subrc <> 0.
+    MESSAGE 'Ошибка вывода в Excel'(005) TYPE cc_msgty_e.
+    STOP.
+  ENDIF.
+ENDFORM.                    "output_excel
+
+*---------------------------------------------------------------------*
+*      Module  CHECK_LIFNR_0110  INPUT
+*---------------------------------------------------------------------*
+MODULE check_lifnr_0110 INPUT.
+  READ TABLE gt_lifnr TRANSPORTING NO FIELDS WITH KEY lifnr = gs_scr_0110-lifnr.
+  IF sy-subrc <> 0.
+    MESSAGE e145 WITH gs_scr_0110-lifnr.
+  ENDIF.
+ENDMODULE.                 " CHECK_LIFNR_0110  INPUT
+
+*---------------------------------------------------------------------*
+*      Module  USER_COMMAND_0110  INPUT
+*---------------------------------------------------------------------*
+MODULE user_command_0110 INPUT.
+
+  IF gs_scr_0110-ok_code = 'CANCEL'.
+    LEAVE TO SCREEN 0.
+  ENDIF.
+
+  IF gs_scr_0110-ok_code = 'OK'.
+*    IF gs_scr_0110-mode = '1' AND ( gs_scr_0110-lifnr = '' OR gs_scr_0110-budat = '' OR gs_scr_0110-bldat = '' ).
+    IF gs_scr_0110-mode = '1' AND ( gs_scr_0110-budat = '' OR gs_scr_0110-bldat = '' ).
+      MESSAGE s146.
+    ELSEIF gs_scr_0110-mode = '2' AND ( gs_scr_0110-belnr = '' OR gs_scr_0110-budat = '' OR gs_scr_0110-bldat = '' ).
+      MESSAGE s146.
+    ELSE.
+      LEAVE TO SCREEN 0.
+    ENDIF.
+  ENDIF.
+
+ENDMODULE.                 " USER_COMMAND_0110  INPUT
+
+*&---------------------------------------------------------------------*
+*&      Form  set_info_status
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM set_info_status.
+  DATA:  lt_output_bd TYPE zcl_acc16_write_off_m=>ty_t_zmmcorr16.
+  FIELD-SYMBOLS <ls_output_bd> LIKE LINE OF lt_output_bd[].
+  FIELD-SYMBOLS <ls_output> LIKE LINE OF gt_output[].
+
+  lt_output_bd[] = go_model->db_read_corr16_curr_mnth( it_lifnr = gt_output_lifnr[] ).
+
+  LOOP AT gt_output[] ASSIGNING <ls_output>.
+
+    "-- проверяем на наличие в сохранненой версии
+    READ TABLE lt_output_bd[] ASSIGNING <ls_output_bd>
+      WITH TABLE KEY bukrs = <ls_output>-bukrs
+                     matnr = <ls_output>-matnr
+                     spmon = <ls_output>-spmon
+                     lifnr = <ls_output>-lifnr.
+    IF sy-subrc = 0.
+      IF <ls_output_bd>-belnr_fi <> '' AND <ls_output_bd>-belnr_st = ''.
+        <ls_output>-status = icon_complete.
+      ELSE.
+        <ls_output>-status = icon_save_as_template.
+      ENDIF.
+
+      IF NOT ( <ls_output>-w_stock_41   = <ls_output_bd>-w_stock_41
+        AND <ls_output>-w_grs_41        = <ls_output_bd>-w_grs_41
+        AND <ls_output>-w_gro_41        = <ls_output_bd>-w_gro_41
+        AND <ls_output>-w_stock_16      = <ls_output_bd>-w_stock_16
+        AND <ls_output>-w_gr_16         = <ls_output_bd>-w_gr_16
+        AND <ls_output>-w_gi_900201     = <ls_output_bd>-w_gi_900201
+        AND <ls_output>-w_gi_900202     = <ls_output_bd>-w_gi_900202
+        AND <ls_output>-w_gi_9102       = <ls_output_bd>-w_gi_9102
+        AND <ls_output>-w_gi_94         = <ls_output_bd>-w_gi_94
+        AND <ls_output>-w_gi_900201_16  = <ls_output_bd>-w_gi_900201_16
+        AND <ls_output>-w_gi_900202_16  = <ls_output_bd>-w_gi_900202_16
+        AND <ls_output>-w_gi_9102_16    = <ls_output_bd>-w_gi_9102_16
+        AND <ls_output>-w_gi_94_16      = <ls_output_bd>-w_gi_94_16
+        AND <ls_output>-w_stock_16_fin  = <ls_output_bd>-w_stock_16_fin ).
+
+        <ls_output>-warning = icon_warning.
+      ENDIF.
+
+      <ls_output>-belnr_fi          = <ls_output_bd>-belnr_fi.
+      <ls_output>-gjahr_fi          = <ls_output_bd>-gjahr_fi.
+      <ls_output>-belnr_st          = <ls_output_bd>-belnr_st.
+      <ls_output>-gjahr_st          = <ls_output_bd>-gjahr_st.
+      <ls_output>-monat_st          = <ls_output_bd>-monat_st.
+      <ls_output>-stock_16_fin_kor  = <ls_output_bd>-stock_16_fin_kor.
+      <ls_output>-belnr_kor16       = <ls_output_bd>-belnr_kor16     .
+      <ls_output>-gjahr_kor16       = <ls_output_bd>-gjahr_kor16     .
+      <ls_output>-monat_kor16       = <ls_output_bd>-monat_kor16     .
+      <ls_output>-belnr_kor16_st    = <ls_output_bd>-belnr_kor16_st.
+      <ls_output>-gjahr_kor16_st    = <ls_output_bd>-gjahr_kor16_st.
+      <ls_output>-monat_kor16_st    = <ls_output_bd>-monat_kor16_st.
+    ELSE.
+      CLEAR: <ls_output>-warning, <ls_output>-status.
+    ENDIF.
+  ENDLOOP.
+
+ENDFORM.                    " SET_INFO_STATUS
+* ---- { RT0K915737.ERP-259
+*&---------------------------------------------------------------------*
+*&      Form  CONVTB_OUT2ALV
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM convtb_out2alv
+  USING
+    it_data_out              TYPE           tt_output
+    is_ctrl_alv              TYPE           t_ctrl_alv
+  CHANGING
+    et_data_alv              TYPE           tt_data_alv.
+
+* -----------------------------------------------
+  DATA:
+    ls_data_out              TYPE           t_output   ,
+    ls_data_alv              TYPE           t_data_alv ,
+    lt_data_alv              TYPE           tt_data_alv.
+
+  FIELD-SYMBOLS:
+    <fs_data_alv>            TYPE           t_data_alv.
+*
+* -----------------------------------------------
+  CLEAR: et_data_alv.
+
+  LOOP AT it_data_out INTO ls_data_out.
+    MOVE-CORRESPONDING ls_data_out TO ls_data_alv.
+    APPEND ls_data_alv TO lt_data_alv.
+  ENDLOOP.
+
+* Изменение параметров отображения ALV на основе данных в таблице
+  LOOP AT lt_data_alv ASSIGNING <fs_data_alv>.
+* -- Для поля 'STOCK_16_FIN_KOR'
+    CASE is_ctrl_alv-s_kor16-cell_mode.
+      WHEN cc_cell_mode_chg.                          " C (Change)
+        PERFORM mdfy_alv_cell_outpar_row
+          USING    'STOCK_16_FIN_KOR'
+                   cl_gui_alv_grid=>mc_style_enabled
+          CHANGING <fs_data_alv>.
+
+      WHEN OTHERS.                                    " D (Display)
+        PERFORM mdfy_alv_cell_outpar_row
+          USING    'STOCK_16_FIN_KOR'
+                   cl_gui_alv_grid=>mc_style_disabled
+          CHANGING <fs_data_alv>.
+    ENDCASE.
+
+* -- Для поля '...'
+*   <...>
+  ENDLOOP.
+
+* Возврат значений
+  et_data_alv = lt_data_alv.
+
+ENDFORM.                    " CONVTB_OUT2ALV
+* ---- } RT0K915737.ERP-259
+
+* ---- { RT0K915737.ERP-259
+*&---------------------------------------------------------------------*
+*&      Form  CONVTB_ALV2OUT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM convtb_alv2out
+  USING
+    it_data_alv              TYPE           tt_data_alv
+  CHANGING
+    et_data_out              TYPE           tt_output.
+
+* -----------------------------------------------
+  DATA:
+    ls_data_out              TYPE           t_output,
+    ls_data_alv              TYPE           t_data_alv,
+    lt_data_out              TYPE           tt_output.
+*
+* -----------------------------------------------
+  CLEAR: et_data_out.
+
+  LOOP AT it_data_alv INTO ls_data_alv.
+    CLEAR: ls_data_out.
+    MOVE-CORRESPONDING ls_data_alv TO ls_data_out.
+    APPEND ls_data_out TO lt_data_out.
+  ENDLOOP.
+
+* Возврат значений
+  et_data_out = lt_data_out.
+ENDFORM.                    " CONVTB_ALV2OUT
+* ---- } RT0K915737.ERP-259
+
+* ---- { RT0K915737.ERP-259
+*&---------------------------------------------------------------------*
+*&      Form  MDFY_ALV_CELL_OUTPAR_ROW
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM mdfy_alv_cell_outpar_row
+  USING
+    ic_fname                 TYPE           c
+    icr_cell_mode            TYPE           raw4
+  CHANGING
+    es_data_alv              TYPE           t_data_alv.
+
+* -----------------------------------------------
+  DATA:
+    ls_styles                TYPE           lvc_s_styl.
+  DATA:
+    lv_r_cell_mode           TYPE           raw4.
+
+  FIELD-SYMBOLS:
+    <fs_styles>              TYPE           lvc_s_styl.
+*
+* -----------------------------------------------
+* Инициализация
+*  es_data_out не очищается!!!
+  CASE ic_fname.
+    WHEN 'STOCK_16_FIN_KOR'.
+* -- Определяется действующий режим для поля
+      CLEAR: lv_r_cell_mode.
+      IF  icr_cell_mode  = cl_gui_alv_grid=>mc_style_enabled  AND
+          ( (     es_data_alv-belnr_kor16    IS INITIAL AND
+                  es_data_alv-gjahr_kor16    IS INITIAL )   OR
+            ( NOT es_data_alv-belnr_kor16    IS INITIAL AND
+              NOT es_data_alv-gjahr_kor16    IS INITIAL AND
+              NOT es_data_alv-belnr_kor16_st IS INITIAL AND
+              NOT es_data_alv-gjahr_kor16_st IS INITIAL ) )   AND
+          es_data_alv-status = icon_complete.                 " Статус - завершен (в табл.ZMMCORR16)
+        lv_r_cell_mode = cl_gui_alv_grid=>mc_style_enabled.
+      ELSE.
+        lv_r_cell_mode = cl_gui_alv_grid=>mc_style_disabled.
+      ENDIF.
+
+* -- Запись признака режима для соотв.поля
+      READ TABLE es_data_alv-cellstyles ASSIGNING <fs_styles>
+        WITH TABLE KEY fieldname = ic_fname.
+      IF sy-subrc <> 0.
+        CLEAR ls_styles.
+        ls_styles-fieldname = ic_fname.
+        ls_styles-style = lv_r_cell_mode.
+        INSERT ls_styles INTO TABLE es_data_alv-cellstyles.
+      ELSE.
+        <fs_styles>-style  = lv_r_cell_mode.
+        UNASSIGN <fs_styles>.
+      ENDIF.
+
+    WHEN OTHERS.
+*     <...do_nothing>
+  ENDCASE.
+
+ENDFORM.                    " MDFY_ALV_CELL_OUTPAR_ROW
+* ---- } RT0K915737.ERP-259
+
+* ---- { RT0K915737.ERP-259
+*&---------------------------------------------------------------------*
+*&      Form  OUTPUT_ALV
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM output_alv .
+* -----------------------------------------------
+*
+* -----------------------------------------------
+  _show_statusbar_message '' 'Формирование вывода...'(079).
+  CLEAR: gs_ctrl_alv.
+
+* Инициализация ALV-Контролей
+  PERFORM init_alv_ctrl CHANGING  gs_ctrl_alv.
+
+* Преобразование данных в формат для вывода в редактируемом ALV
+  PERFORM convtb_out2alv  USING     gt_output[]
+                                    gs_ctrl_alv
+                          CHANGING  gt_data_alv.
+
+* ВЫвод ALV Grid
+  CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+    EXPORTING
+      i_callback_program       = sy-cprog
+      i_callback_pf_status_set = 'PF_STATUS_SET'
+      i_callback_user_command  = 'USER_COMMAND'
+      is_layout_lvc            = gs_ctrl_alv-s_layo
+      it_fieldcat_lvc          = gs_ctrl_alv-t_fcat
+      it_sort_lvc              = gs_ctrl_alv-t_sort
+      i_save                   = 'A'
+    TABLES
+      t_outtab                 = gt_data_alv[]
+    EXCEPTIONS
+      OTHERS                   = 2.
+  IF sy-subrc <> 0.
+    MESSAGE 'Ошибка при выводе ALV'(074) TYPE 'A'.
+  ENDIF.
+
+ENDFORM.                    " OUTPUT_ALV
+
+*&---------------------------------------------------------------------*
+*&      Form  PREP_ALV_FCAT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM prep_alv_fcat CHANGING et_fcat TYPE lvc_t_fcat.
+* -----------------------------------------------
+  DATA:
+    lt_fcat                  TYPE           lvc_t_fcat,
+    lv_c_fname               TYPE           lvc_s_fcat-fieldname,
+    lv_i_col_pos             TYPE           lvc_s_fcat-col_pos.
+
+* ----
+  FIELD-SYMBOLS:
+    <fs_fcat>                TYPE           lvc_s_fcat.
+
+* -----------------------------------------------
+  DEFINE alv_fcat_mdfyrow.
+    read table lt_fcat with key fieldname = &1 assigning <fs_fcat>.
+    if sy-subrc <> 0.
+      append initial line to lt_fcat assigning <fs_fcat>.
+      <fs_fcat>-fieldname = &1.
+    endif.
+  END-OF-DEFINITION.
+
+* -----------------------------------------------
+  CLEAR: et_fcat.
+
+* Инициализация Fieldcat
+* -- Retrieve данных из DDIC
+  PERFORM get_alv_ddic_fcat
+    USING    'ZMMCORR16'
+    CHANGING lt_fcat.
+
+* -- Сброc признаков по всем полям
+  LOOP AT lt_fcat ASSIGNING <fs_fcat>.
+    CLEAR <fs_fcat>-col_pos.                          " Очистка № колонки в ALV
+    <fs_fcat>-no_out  = abap_true.                    " Поле не Выводится в ALV - YES
+  ENDLOOP.
+
+* Установка для полей парметров вывода в ALV
+  DO 1 TIMES.
+    CHECK lines( lt_fcat ) > 0.
+
+* Поля ALV по порядку при выводе на экран:
+*    DO 37 TIMES.  	              " ----   RT0K916109.RTKDEVSAP-33, Закомментировано
+    DO 39 TIMES.                  " ----   RT0K916109.RTKDEVSAP-33
+      CLEAR:  lv_c_fname.
+      UNASSIGN <fs_fcat>.
+      lv_i_col_pos = sy-index.
+
+      CASE lv_i_col_pos.
+* 1. STATUS
+        WHEN 1.
+          lv_c_fname = 'STATUS'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos.                      " Номер столбца
+            <fs_fcat>-no_out    = abap_false  .                      " Поле выводится
+            <fs_fcat>-key       = abap_true   .                      " Поле ключевое
+            <fs_fcat>-icon      = abap_true   .                      " отобр.поля как иконки
+            <fs_fcat>-no_zero   = abap_false  .                      " Отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false  .                      " НЕ суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 4           .                      " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Стс'(032)  .                      " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'         .                      "
+          ENDIF.
+
+* 2. WARNING
+        WHEN 2.
+          lv_c_fname = 'WARNING'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos.                      " Номер столбца
+            <fs_fcat>-no_out    = abap_false  .                      " Поле выводится
+            <fs_fcat>-key       = abap_true   .                      " Поле ключевое
+            <fs_fcat>-icon      = abap_true   .                      " отобр.поля как иконки
+            <fs_fcat>-no_zero   = abap_false  .                      " Отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false  .                      " НЕ суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 4           .                      " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Рсх'(033)  .                      " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'         .                      "
+          ENDIF.
+
+* 3. MATNR
+        WHEN 3.
+          lv_c_fname = 'MATNR'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos  .                    " Номер столбца
+            <fs_fcat>-no_out    = abap_false    .                    " Поле выводится
+            <fs_fcat>-key       = abap_true     .                    " Поле ключевое
+            <fs_fcat>-no_zero   = abap_false    .                    " Отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false    .                    " НЕ суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 12            .                    " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Артикул'(034).                    " Метка поля в ALV
+          ENDIF.
+* 4. MAKTX
+        WHEN 4.
+          lv_c_fname = 'MAKTX'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos        .              " Номер столбца
+            <fs_fcat>-no_out    = abap_false          .              " Поле выводится
+            <fs_fcat>-key       = abap_true           .              " Поле ключевое
+            <fs_fcat>-no_zero   = abap_false          .              " Отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false          .              " НЕ суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 40                  .              " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Краткий Текст'(035).              " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'                 .              "
+          ENDIF.
+
+* 5. LIFNR
+        WHEN 5.
+          lv_c_fname = 'LIFNR'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos    .                  " Номер столбца
+            <fs_fcat>-no_out    = abap_false      .                  " Поле выводится
+            <fs_fcat>-key       = abap_false      .                  " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_false      .                  " Отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false      .                  " НЕ суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 10              .                  " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Поставщик'(036).                  " Метка поля в ALV
+          ENDIF.
+
+* 6. NAME
+        WHEN 6.
+          lv_c_fname = 'NAME'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos.                      " Номер столбца
+            <fs_fcat>-no_out    = abap_false  .                      " Поле выводится
+            <fs_fcat>-key       = abap_false  .                      " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_false  .                      " Отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false  .                      " НЕ суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 20          .                      " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Имя'(037)  .                      " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'         .                      "
+          ENDIF.
+
+* 7. STOCK_41
+        WHEN 7.
+          lv_c_fname = 'STOCK_41'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos      .                " Номер столбца
+            <fs_fcat>-no_out    = abap_true         .                " Поле скрыто
+            <fs_fcat>-key       = abap_false        .                " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true         .                " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true         .                " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                .                " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'ОстНачПер41'(038).                " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'               .                "
+          ENDIF.
+
+* 8. GRS_41
+        WHEN 8.
+          lv_c_fname = 'GRS_41'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos        .              " Номер столбца
+            <fs_fcat>-no_out    = abap_true           .              " Поле скрыто
+            <fs_fcat>-key       = abap_false          .              " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true           .              " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true           .              " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                  .              " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'ПостОтПствщ41'(039).              " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'                 .              "
+          ENDIF.
+
+* 9. GRO_41
+        WHEN 9.
+          lv_c_fname = 'GRO_41'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos       .               " Номер столбца
+            <fs_fcat>-no_out    = abap_true          .               " Поле скрыто
+            <fs_fcat>-key       = abap_false         .               " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true          .               " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true          .               " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 13                 .               " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'ПрочПоступ41'(040).               " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'                .               "
+          ENDIF.
+
+* 10. GR_16
+        WHEN 10.
+          lv_c_fname = 'GR_16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos      .                " Номер столбца
+            <fs_fcat>-no_out    = abap_true         .                " Поле скрыто
+            <fs_fcat>-key       = abap_false        .                " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true         .                " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true         .                " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                .                " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'ПостЗаПер16'(041).                " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'               .                "
+          ENDIF.
+
+* 11. GI_9002
+        WHEN 11.
+          lv_c_fname = 'GI_9002'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos   .                   " Номер столбца
+            <fs_fcat>-no_out    = abap_true      .                   " Поле скрыто
+            <fs_fcat>-key       = abap_false     .                   " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true      .                   " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true      .                   " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17             .                   " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Спис9002'(042).                   " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'            .                   "
+          ENDIF.
+
+* 12. GI_9102
+        WHEN 12.
+          lv_c_fname = 'GI_9102'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos   .                   " Номер столбца
+            <fs_fcat>-no_out    = abap_true      .                   " Поле скрыто
+            <fs_fcat>-key       = abap_false     .                   " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true      .                   " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true      .                   " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17             .                   " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Спис9102'(043).                   " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'            .                   "
+          ENDIF.
+
+* 13. GI_94
+        WHEN 13.
+          lv_c_fname = 'GI_94'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos.                      " Номер столбца
+            <fs_fcat>-no_out    = abap_true    .                     " Поле скрыто
+            <fs_fcat>-key       = abap_false   .                     " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true    .                     " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true    .                     " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17           .                     " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Спис94'(044).                     " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'          .                     "
+          ENDIF.
+
+* 14. W_STOCK_41
+        WHEN 14.
+          lv_c_fname = 'W_STOCK_41'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos         .             " Номер столбца
+            <fs_fcat>-no_out    = abap_false           .             " Поле выводится
+            <fs_fcat>-key       = abap_false           .             " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true            .             " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true            .             " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                   .             " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумОстНачПер41'(031).             " Метка поля в ALV
+          ENDIF.
+
+* 15. W_GRS_41
+        WHEN 15.
+          lv_c_fname = 'W_GRS_41'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos           .           " Номер столбца
+            <fs_fcat>-no_out    = abap_false             .           " Поле выводится
+            <fs_fcat>-key       = abap_false             .           " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true              .           " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true              .           " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 18                     .           " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумПостОтПствщ41'(030).           " Метка поля в ALV
+          ENDIF.
+
+* 16. W_GRO_41
+        WHEN 16.
+          lv_c_fname = 'W_GRO_41'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos          .            " Номер столбца
+            <fs_fcat>-no_out    = abap_false            .            " Поле выводится
+            <fs_fcat>-key       = abap_false            .            " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true             .            " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true             .            " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 18                    .            " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумПрочПоступ41'(029).            " Метка поля в ALV
+          ENDIF.
+
+* 17. W_STOCK_16
+        WHEN 17.
+          lv_c_fname = 'W_STOCK_16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos         .             " Номер столбца
+            <fs_fcat>-no_out    = abap_false           .             " Поле выводится
+            <fs_fcat>-key       = abap_false           .             " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true            .             " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true            .             " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                   .             " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумОстНачПер16'(028).             " Метка поля в ALV
+          ENDIF.
+
+* 18. W_GR_16
+        WHEN 18.
+          lv_c_fname = 'W_GR_16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos         .             " Номер столбца
+            <fs_fcat>-no_out    = abap_false           .             " Поле выводится
+            <fs_fcat>-key       = abap_false           .             " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true            .             " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true            .             " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                   .             " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумПостЗаПер16'(027).             " Метка поля в ALV
+          ENDIF.
+
+* 19. KOEF_OUT
+        WHEN 19.
+          lv_c_fname = 'KOEF_OUT'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos.                      " Номер столбца
+            <fs_fcat>-no_out    = abap_false  .                      " Поле выводится
+            <fs_fcat>-key       = abap_false  .                      " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_false  .                      " Отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false  .                      " НЕ суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17          .                      " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Коэф'(026) .                      " Метка поля в ALV
+            <fs_fcat>-tabname   = '1'         .                      "
+          ENDIF.
+
+* ----------------- MM: Ретрокоррекция, деление по счетам 9002
+* 20. W_GI_9002
+        WHEN 20.
+          lv_c_fname = 'W_GI_9002'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos         .             " Номер столбца
+            <fs_fcat>-no_out    = abap_false           .             " Поле выводится
+            <fs_fcat>-key       = abap_false           .             " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true            .             " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true            .             " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                   .             " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписТов9002'(025).             " Метка поля в ALV
+          ENDIF.
+
+* 21. W_GI_900201
+        WHEN 21.
+          lv_c_fname = 'W_GI_900201'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos           .           " Номер столбца
+            <fs_fcat>-no_out    = abap_false             .           " Поле выводится
+            <fs_fcat>-key       = abap_false             .           " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true              .           " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true              .           " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 19                     .           " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписТов900201'(024).           " Метка поля в ALV
+          ENDIF.
+
+* 22. W_GI_900202
+        WHEN 22.
+          lv_c_fname = 'W_GI_900202'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos           .           " Номер столбца
+            <fs_fcat>-no_out    = abap_false             .           " Поле выводится
+            <fs_fcat>-key       = abap_false             .           " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true              .           " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true              .           " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 19                     .           " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписТов900202'(023).           " Метка поля в ALV
+          ENDIF.
+
+* ----------------- MM: Ретрокоррекция, деление по счетам 9002
+* 23. W_GI_9102
+        WHEN 23.
+          lv_c_fname = 'W_GI_9102'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos            .          " Номер столбца
+            <fs_fcat>-no_out    = abap_false              .          " Поле выводится
+            <fs_fcat>-key       = abap_false              .          " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true               .          " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true               .          " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                      .          " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписТовара9102'(014).          " Метка поля в ALV
+          ENDIF.
+
+* 24. W_GI_94
+        WHEN 24.
+          lv_c_fname = 'W_GI_94'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos          .            " Номер столбца
+            <fs_fcat>-no_out    = abap_false            .            " Поле выводится
+            <fs_fcat>-key       = abap_false            .            " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true             .            " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true             .            " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                    .            " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписТовара94'(013).            " Метка поля в ALV
+          ENDIF.
+
+* ----------------- MM: Ретрокоррекция, деление по счетам 9002
+* 25. W_GI_9002_16
+        WHEN 25.
+          lv_c_fname = 'W_GI_9002_16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos          .            " Номер столбца
+            <fs_fcat>-no_out    = abap_false            .            " Поле выводится
+            <fs_fcat>-key       = abap_false            .            " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true             .            " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true             .            " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                    .            " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписОткл9002'(012).            " Метка поля в ALV
+          ENDIF.
+
+* 26. W_GI_900201_16
+        WHEN 26.
+          lv_c_fname = 'W_GI_900201_16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos            .          " Номер столбца
+            <fs_fcat>-no_out    = abap_false              .          " Поле выводится
+            <fs_fcat>-key       = abap_false              .          " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true               .          " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true               .          " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 19                      .          " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписОткл900201'(011).          " Метка поля в ALV
+          ENDIF.
+
+* 27. W_GI_900202_16
+        WHEN 27.
+          lv_c_fname = 'W_GI_900202_16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos            .          " Номер столбца
+            <fs_fcat>-no_out    = abap_false              .          " Поле выводится
+            <fs_fcat>-key       = abap_false              .          " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true               .          " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true               .          " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 19                      .          " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписОткл900202'(010).          " Метка поля в ALV
+          ENDIF.
+
+* ----------------- MM: Ретрокоррекция, деление по счетам 9002
+* 28. W_GI_9102_16
+        WHEN 28.
+          lv_c_fname = 'W_GI_9102_16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos          .            " Номер столбца
+            <fs_fcat>-no_out    = abap_false            .            " Поле выводится
+            <fs_fcat>-key       = abap_false            .            " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true             .            " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true             .            " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                    .            " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписОткл9102'(009).            " Метка поля в ALV
+          ENDIF.
+
+* 29. W_GI_94_16
+        WHEN 29.
+          lv_c_fname = 'W_GI_94_16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos        .              " Номер столбца
+            <fs_fcat>-no_out    = abap_false          .              " Поле выводится
+            <fs_fcat>-key       = abap_false          .              " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true           .              " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true           .              " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                  .              " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумСписОткл94'(008).              " Метка поля в ALV
+          ENDIF.
+
+* 30. W_STOCK_16_FIN
+        WHEN 30.
+          lv_c_fname = 'W_STOCK_16_FIN'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos         .             " Номер столбца
+            <fs_fcat>-no_out    = abap_false           .             " Поле выводится
+            <fs_fcat>-key       = abap_false           .             " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true            .             " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true            .             " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                   .             " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СумОстКонПер16'(022).             " Метка поля в ALV
+          ENDIF.
+
+* -------------------------------------------------------------------------------
+* 31. BELNR_FI
+        WHEN 31.
+          lv_c_fname = 'BELNR_FI'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos                         .  " Номер столбца
+            <fs_fcat>-no_out    = abap_false                           .  " Поле выводится
+            <fs_fcat>-key       = abap_false                           .  " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true                            .  " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false                           .  " НЕ Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 12                                   .  " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Проводка16/9*'(021)                 .  " Метка поля в ALV
+            <fs_fcat>-reptext   = 'Финансовый документ 16/9*'(096)     .  " Текст Вспл.подсказки  " ----   RT0K916270.RTKDEVSAP-33
+          ENDIF.
+
+* 32. GJAHR_FI
+        WHEN 32.
+          lv_c_fname = 'GJAHR_FI'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname  .
+            <fs_fcat>-col_pos   = lv_i_col_pos                           .   " Номер столбца
+*            <fs_fcat>-no_out    = abap_true                              .  " Поле скрыто         " ----   RT0K916270.RTKDEVSAP-33
+            <fs_fcat>-no_out    = abap_false                             .   " Поле отображается   " ----   RT0K916270.RTKDEVSAP-33
+            <fs_fcat>-key       = abap_false                             .   " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true                              .   " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false                             .   " НЕ Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 5                                      .   " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'ГдДкм16/9*'(020)                           .   " Метка поля в ALV
+            <fs_fcat>-reptext   = 'Год финанасового документа 16/9*'(095).   " Текст Вспл.подсказки  " ----   RT0K916270.RTKDEVSAP-33
+          ENDIF.
+
+* 33. BELNR_ST
+        WHEN 33.
+          lv_c_fname = 'BELNR_ST'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos               .       " Номер столбца
+            <fs_fcat>-no_out    = abap_false                 .       " Поле выводится
+            <fs_fcat>-key       = abap_false                 .       " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true                  .       " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false                 .       " НЕ Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 12                         .       " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'Сторно16/9*'(019)         .       " Метка поля в ALV
+            <fs_fcat>-reptext   = 'Фин.док.сторно 16/9*'(094).       " Текст Вспл.подсказки  " ----   RT0K916270.RTKDEVSAP-33
+          ENDIF.
+
+* 34. GJAHR_ST
+        WHEN 34.
+          lv_c_fname = 'GJAHR_ST'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos                   .   " Номер столбца
+*            <fs_fcat>-no_out    = abap_true                     .   " Поле скрыто         " ----   RT0K916270.RTKDEVSAP-33
+            <fs_fcat>-no_out    = abap_false                     .   " Поле отображается   " ----   RT0K916270.RTKDEVSAP-33
+            <fs_fcat>-key       = abap_false                     .   " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true                      .   " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false                     .   " НЕ Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 5                              .   " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'ГдСтрн16/9*'(092)             .   " Метка поля в ALV      " ----   RT0K916270.RTKDEVSAP-33
+            <fs_fcat>-reptext   = 'Год фин.док.сторно 16/9*'(093).   " Текст Вспл.подсказки  " ----   RT0K916270.RTKDEVSAP-33
+          ENDIF.
+
+
+* 35. STOCK_16_FIN_KOR
+        WHEN 35.
+          lv_c_fname = 'STOCK_16_FIN_KOR'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos        .              " Номер столбца
+            <fs_fcat>-no_out    = abap_false          .              " Поле выводится
+            <fs_fcat>-key       = abap_false          .              " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true           .              " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_true           .              " Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 17                  .              " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'КоррОстКнцПер'(017).              " Метка поля в ALV
+            <fs_fcat>-reptext   = 'Сумма бух.документа кррекции'(091). " Текст Вспл.подсказки  " ----   RT0K916270.RTKDEVSAP-33
+*            <fs_fcat>-edit      = abap_true           .              " Поле редактируеется в ALV
+          ENDIF.
+
+* 36. BELNR_KOR16
+        WHEN 36.
+          lv_c_fname = 'BELNR_KOR16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos       .                    " Номер столбца
+            <fs_fcat>-no_out    = abap_false         .                    " Поле выводится
+            <fs_fcat>-key       = abap_false         .                    " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true          .                    " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false         .                    " НЕ Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 12                 .                    " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'НмрБухДкКорр'(016).                    " Метка поля в ALV
+            <fs_fcat>-reptext   = 'Номер бух.документа кррекции'(078).    " Текст Вспл.подсказки
+          ENDIF.
+
+* 37. GJAHR_KOR16
+        WHEN 37.
+          lv_c_fname = 'GJAHR_KOR16'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos.                           " Номер столбца
+            <fs_fcat>-no_out    = abap_false  .                           " Поле выводится
+            <fs_fcat>-key       = abap_false  .                           " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true   .                           " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false  .                           " НЕ Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 5           .                           " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'ГдКор'(015).                           " Метка поля в ALV
+            <fs_fcat>-reptext   = 'Год бух.документа кррекции'(080).      " Текст Вспл.подсказки
+          ENDIF.
+
+* 38. BELNR_KOR16_ST
+        WHEN 38.
+          lv_c_fname = 'BELNR_KOR16_ST'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos                              .  " Номер столбца
+            <fs_fcat>-no_out    = abap_false                                .  " Поле выводится
+            <fs_fcat>-key       = abap_false                                .  " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true                                 .  " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false                                .  " НЕ Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 12                                        .  " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СтрнНмБухДкКорр'(048)                    .  " Метка поля в ALV
+            <fs_fcat>-reptext   = 'Номер бух.документа кррекции сторно'(054).  " Текст Вспл.подсказки
+          ENDIF.
+
+* 39. GJAHR_KOR16_ST
+        WHEN 39.
+          lv_c_fname = 'GJAHR_KOR16_ST'.
+          alv_fcat_mdfyrow  lv_c_fname.
+          IF <fs_fcat> IS ASSIGNED AND <fs_fcat>-fieldname = lv_c_fname.
+            <fs_fcat>-col_pos   = lv_i_col_pos                      .          " Номер столбца
+            <fs_fcat>-no_out    = abap_false                        .          " Поле выводится
+            <fs_fcat>-key       = abap_false                        .          " Поле НЕ ключевое
+            <fs_fcat>-no_zero   = abap_true                         .          " НЕ отобр.в зн.поля ведущие нули
+            <fs_fcat>-do_sum    = abap_false                        .          " НЕ Суммировать значения в ALV по полю
+            <fs_fcat>-outputlen = 5                                 .          " Длина вывода поля в ALV
+            <fs_fcat>-coltext   = 'СтрнГдКор'(049)                  .          " Метка поля в ALV
+            <fs_fcat>-reptext   = 'Год бух.док.кррекции сторно'(059).          " Текст Вспл.подсказки
+          ENDIF.
+
+        WHEN OTHERS.
+          CONTINUE.
+      ENDCASE.
+    ENDDO.
+
+    SORT  lt_fcat BY col_pos.
+  ENDDO.
+
+  et_fcat = lt_fcat.
+ENDFORM.                    " PREP_ALV_FCAT
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_ALV_DDIC_FCAT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM get_alv_ddic_fcat
+  USING
+    ic_tabname               TYPE           c
+  CHANGING
+    et_fcat                  TYPE           lvc_t_fcat.
+
+* ---------------------------
+  DATA:
+    lv_c_tabname             TYPE           dd02l-tabname,
+    lr_cx_root               TYPE REF TO    cx_root,
+    lv_s_msgtext             TYPE           string .
+*
+* ---------------------------
+  CLEAR et_fcat.
+  lv_c_tabname = ic_tabname.
+
+  TRY.
+      CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+        EXPORTING
+          i_buffer_active        = abap_false
+          i_structure_name       = ic_tabname
+          i_bypassing_buffer     = abap_true
+*         i_internal_tabname     = 'LTB_MAIN'
+*         i_client_never_display = 'X'
+        CHANGING
+          ct_fieldcat            = et_fcat
+        EXCEPTIONS
+*         inconsistent_interface = 1
+*         program_error          = 2
+          OTHERS                 = 4.
+      IF sy-subrc <> 0.
+        CONCATENATE
+          'Ошибка при получении объекта Field Catalog для структуры'(075) lv_c_tabname
+            INTO lv_s_msgtext SEPARATED BY space.
+        MESSAGE lv_s_msgtext TYPE 'A'.        " Exit program
+      ENDIF.
+
+    CATCH cx_root INTO lr_cx_root           ##CATCH_ALL.
+      lv_s_msgtext = lr_cx_root->get_text( ).
+      MESSAGE lv_s_msgtext TYPE 'A'.        " Exit program
+  ENDTRY.
+
+ENDFORM.                    " GET_ALV_DDIC_FCAT
+
+*&---------------------------------------------------------------------*
+*&      Form  PREP_ALV_SORTING
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM prep_alv_sorting CHANGING  et_sort TYPE lvc_t_sort.
+  "-----------------------------------------------
+  DATA ls_sort TYPE lvc_s_sort.
+
+  "-----------------------------------------------
+  CLEAR: et_sort.
+
+  CLEAR ls_sort.
+  ls_sort-spos      = '01'.
+  ls_sort-fieldname = 'MATNR'.
+  ls_sort-up        = abap_true.
+  ls_sort-subtot    = abap_false.
+  APPEND ls_sort TO et_sort.
+
+ENDFORM.                    " PREP_ALV_SORTING
+
+*&---------------------------------------------------------------------*
+*&      Form  INIT_ALV_CTRL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM init_alv_ctrl
+  CHANGING
+    es_ctrl_alv              TYPE           t_ctrl_alv .
+* -----------------------------------------------
+*
+* -----------------------------------------------
+  CLEAR: es_ctrl_alv.
+
+* Поготовка объектов ALV:
+* -- ALV: Fieldcatalog
+  PERFORM prep_alv_fcat CHANGING es_ctrl_alv-t_fcat.
+
+* -- ALV: Layout
+  es_ctrl_alv-s_layo-zebra      = abap_true   .
+  es_ctrl_alv-s_layo-totals_bef = abap_true   .       " Вывод строк промежуточного копирования ПЕРЕД строками ALV
+  es_ctrl_alv-s_layo-info_fname = 'ROWCOLOR'  .       " ROW colouring
+  es_ctrl_alv-s_layo-ctab_fname = 'CELLCOLORS'.       " Cell colouring
+  es_ctrl_alv-s_layo-stylefname = 'CELLSTYLES'.       " Cell style
+*  es_ctrl_alv-s_layo-box_fname  = 'SELECTED'  .       " Selected rows contain 'X'
+*  es_ctrl_alv-s_layo-sel_mode   = 'A'.
+*  es_ctrl_alv-s_layo-no_rowmark = abap_true.
+
+* -- ALV: Sotring table
+  PERFORM prep_alv_sorting CHANGING es_ctrl_alv-t_sort.
+
+* -- ALV Флаги
+  es_ctrl_alv-s_kor16-cell_mode = cc_cell_mode_dsp.
+ENDFORM.                    " INIT_ALV_CTRL
+
+*&---------------------------------------------------------------------*
+*&      Form  CONV_ALV_FCAT4CM
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM conv_alv_fcat4cm
+  USING
+    it_fcat_src              TYPE           lvc_t_fcat
+  CHANGING
+    value(et_fcat_dst)       TYPE           lvc_t_fcat.
+
+* -----------------------------------------------
+  FIELD-SYMBOLS:
+    <fs_fcat>                TYPE           lvc_s_fcat.
+*
+* -----------------------------------------------
+* -- инициализация
+  et_fcat_dst = it_fcat_src.
+
+  LOOP AT et_fcat_dst ASSIGNING <fs_fcat>.
+* -- отмена суммирования по полям
+    DO 1 TIMES.
+      CHECK <fs_fcat>-do_sum = abap_true.
+      <fs_fcat>-do_sum = abap_false.
+    ENDDO.
+
+** -- ...
+*    DO 1 TIMES.
+*    ENDDO.
+
+  ENDLOOP.
+ENDFORM.                    " CONV_ALV_FCAT4CM
+* ---- } RT0K915737.ERP-259
+
+* ---- { RT0K915737.ERP-259
+*&---------------------------------------------------------------------*
+*&      Form  CONV_ALV_FCAT4DM
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM conv_alv_fcat4dm
+  USING
+    it_fcat_src              TYPE           lvc_t_fcat
+  CHANGING
+    et_fcat_dst              TYPE           lvc_t_fcat.
+
+* -----------------------------------------------
+  DATA:
+    ls_fcat                  TYPE           lvc_s_fcat.
+
+  FIELD-SYMBOLS:
+    <fs_fcat>                TYPE           lvc_s_fcat.
+*
+* -----------------------------------------------
+* -- инициализация
+*  et_fcat_dst не очищается!!!
+
+  LOOP AT it_fcat_src  INTO ls_fcat.
+    READ TABLE et_fcat_dst ASSIGNING <fs_fcat>
+      WITH KEY fieldname = ls_fcat-fieldname.
+    CHECK sy-subrc = 0.
+
+* -- восстановление суммирования по полям
+    DO 1 TIMES.
+      CHECK ls_fcat-do_sum = abap_true.
+      <fs_fcat>-do_sum = ls_fcat-do_sum.
+    ENDDO.
+
+** -- ...
+*    DO 1 TIMES.
+*    ENDDO.
+
+  ENDLOOP.
+
+ENDFORM.                    " CONV_ALV_FCAT4DM
+* ---- } RT0K915737.ERP-259
+
+* ---- } RT0K915737.ERP-259
+*&---------------------------------------------------------------------*
+*&      Form  TRGR_ALV_KOR16_MODE
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM trgr_alv_kor16_mode
+  CHANGING
+    es_ctrl_alv       TYPE    t_ctrl_alv.
+
+* -----------------------------------------------
+  DATA:
+    lv_r_cell_mode_kor16       TYPE           raw4      ,
+    ls_stable                  TYPE           lvc_s_stbl.
+*    lt_fcat                    TYPE           lvc_t_fcat,
+*    lt_sel_cells               TYPE           lvc_t_cell.
+
+  FIELD-SYMBOLS:
+    <fs_fcat>                  TYPE           lvc_s_fcat,
+    <fs_data_alv>              TYPE           t_data_alv.
+*
+* -----------------------------------------------
+* инициализация
+*  es_ctrl_alv   не очищается!!!
+
+* Получение текущих значений объектов управления ALV
+* -- Field Catalog: trigger entire column to Dispaly/ Change...
+* Текущее значение FIELDCAT
+  es_ctrl_alv-r_alv->get_frontend_fieldcatalog(
+    IMPORTING et_fieldcatalog = es_ctrl_alv-t_fcat* ).
+
+* Модификация объектов управления ALV
+* ---- Объекты ALV (Field Catalog, Layout, Selected cell ) получаются из ALV при выполнении USER_COMMAND
+* ---- Установка режима для ALV (KORR16)
+  DO 1 TIMES.
+    READ TABLE es_ctrl_alv-t_fcat* ASSIGNING <fs_fcat>
+      WITH KEY fieldname = 'STOCK_16_FIN_KOR'.
+    CHECK sy-subrc = 0.
+
+    CASE es_ctrl_alv-s_kor16-cell_mode.
+      WHEN cc_cell_mode_chg.                        " 'C' (Change) cc_cell_mode_chg
+        <fs_fcat>-edit       = abap_true.
+        lv_r_cell_mode_kor16 = cl_gui_alv_grid=>mc_style_enabled.
+
+* ------ Конвертация Field Catalog для режима ИЗМЕНЕНИЯ ALV
+*       - Отмена суммирования по колонкам [DUMP!], ...
+        PERFORM conv_alv_fcat4cm
+          USING     es_ctrl_alv-t_fcat*
+          CHANGING  es_ctrl_alv-t_fcat*.
+
+      WHEN OTHERS.                                  " 'D' (Dispaly) cc_cell_mode_dsp.
+        <fs_fcat>-edit       = abap_false.
+        lv_r_cell_mode_kor16 = cl_gui_alv_grid=>mc_style_disabled.
+
+* ------ Конвертация Field Catalog для режима ПРОСМОТРА ALV
+*       - Восстановление суммирования по колонкам в режиме просмотра
+
+* -------- Если нет сохраненного последнего FCAT для Display -> использ.оригинальный
+        IF lines( es_ctrl_alv-t_fcat_lst_dm* ) = 0.
+          es_ctrl_alv-t_fcat_lst_dm* = es_ctrl_alv-t_fcat.
+        ENDIF.
+
+* -------- ...
+        PERFORM conv_alv_fcat4dm
+          USING     es_ctrl_alv-t_fcat_lst_dm*
+          CHANGING  es_ctrl_alv-t_fcat*.
+    ENDCASE.
+  ENDDO.
+
+* ---- Установка режима для ALV (...)
+  DO 1 TIMES       ##NEEDED.
+*       <...>
+  ENDDO.
+
+* -- Set Style for cell particularly
+* Изменение параметров отображения ALV на основе данных в таблице
+  LOOP AT gt_data_alv ASSIGNING <fs_data_alv>.
+* ---- Для поля 'STOCK_16_FIN_KOR'
+    PERFORM mdfy_alv_cell_outpar_row
+      USING    'STOCK_16_FIN_KOR'
+               lv_r_cell_mode_kor16
+      CHANGING <fs_data_alv>.
+
+* ---- Для поля '...'
+*       <...>
+  ENDLOOP.
+
+* Применение к ALV модифицированных объектов управления
+* -- Field Catalog
+  IF lines( es_ctrl_alv-t_fcat* ) > 0.
+    es_ctrl_alv-r_alv->set_frontend_fieldcatalog(
+      EXPORTING it_fieldcatalog =  es_ctrl_alv-t_fcat* ).
+  ENDIF.
+
+* -- <...>
+
+* Refresh table Display
+  ls_stable-row = ls_stable-col = abap_true.
+  es_ctrl_alv-r_alv->refresh_table_display(
+    EXPORTING  is_stable      = ls_stable
+    EXCEPTIONS OTHERS         = 0 ).
+
+ENDFORM.                    " TRGR_ALV_KOR16_MODE
+* ---- } RT0K915737.ERP-259
+
+*---------------------------------------------------------------------*
+*      Form  SAVE_KOR16_VAL
+*---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+* Использование глобальных переменных
+*  - p_bukrs
+*  - so_matnr
+*  - p_spmon
+*  -...
+*
+* Изменение глобальных переменных
+*  -...
+*----------------------------------------------------------------------*
+FORM save_kor16_val
+  USING
+    it_output                TYPE           tt_output
+    ic_commit                TYPE           boole_d
+    ic_allmsg2jrn            TYPE           boole_d
+  CHANGING
+    ec_error                 TYPE           boole_d
+    et_return                TYPE           bapirettab.
+
+* -----------------------------------------------
+  DATA:
+    ls_zmmcorr16_db         TYPE            zmmcorr16,
+    ls_output               TYPE            t_output ,
+    ls_message              TYPE            symsg    ,
+    lv_c_spmon(7)           TYPE            c.
+  DATA:
+    lv_s_msgtext            TYPE            string,
+    lr_cx_root              TYPE REF TO     cx_root.
+  DATA:
+    lt_zmmcorr16            TYPE STANDARD TABLE OF    zmmcorr16
+                              WITH NON-UNIQUE KEY primary_key COMPONENTS mandt bukrs matnr spmon lifnr.
+  DATA lo_peri_conv_exit TYPE REF TO lcl_peri_conv_exit.
+* -----------------------------------------------
+* инициализация
+  CLEAR: ec_error, et_return.
+
+  CREATE OBJECT lo_peri_conv_exit.
+
+* ----
+  SELECT *
+    INTO TABLE lt_zmmcorr16[]
+    FROM zmmcorr16
+    WHERE bukrs =  p_bukrs    AND
+          matnr IN so_matnr[] AND
+          spmon IN so_spmon[] AND
+          lifnr IN so_lifnr[].
+
+  LOOP AT it_output INTO ls_output.
+    CHECK ls_output-status = icon_complete.
+
+    lv_c_spmon = lo_peri_conv_exit->output( ls_output-spmon ).
+
+* ----
+    CHECK (     ls_output-belnr_kor16    IS INITIAL AND       " док.корруктировки 16сч. - Не создавался
+                ls_output-gjahr_kor16    IS INITIAL )   OR
+          ( NOT ls_output-belnr_kor16    IS INITIAL AND       " док.корруктировки 16сч. - был создаван и сторнирован
+            NOT ls_output-gjahr_kor16    IS INITIAL AND
+            NOT ls_output-belnr_kor16_st IS INITIAL AND
+            NOT ls_output-gjahr_kor16_st IS INITIAL ).
+
+* ----
+    IF ( NOT ls_output-gjahr_kor16    IS INITIAL OR    " Уже имеется несторнировнный документ корректировки KOR16
+         NOT ls_output-belnr_kor16    IS INITIAL )  AND
+       (     ls_output-belnr_kor16_st IS INITIAL OR
+             ls_output-gjahr_kor16_st IS INITIAL ).
+
+      ls_message-msgid = 'ZMM2'.
+      ls_message-msgty = 'E'   .
+      ls_message-msgno = '017' .        " Для записи & документ коррекции сальдо 16 сч. & &. &
+      ls_message-msgv1 = ls_output-bukrs && ':' && ls_output-matnr && ':' && lv_c_spmon.
+      ls_message-msgv2 = ls_output-belnr_kor16 && '/' && ls_output-gjahr_kor16.
+      ls_message-msgv3 = 'уже создан'(046).
+      ls_message-msgv4 = space.
+
+      MESSAGE e017(zmm2) WITH ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+
+      _add_bapi_message:
+        et_return ls_message-msgty ls_message-msgno ls_message-msgid
+          ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+      CONTINUE.
+
+* -- Ошибка
+    ELSEIF ( ls_output-gjahr_fi IS INITIAL AND        " Бухгалтерский документ не создан
+             ls_output-belnr_fi IS INITIAL )  AND
+           ( ls_output-gjahr_st IS INITIAL AND
+             ls_output-belnr_st IS INITIAL ) .
+      ls_message-msgid = 'ZMM2'.
+      ls_message-msgty = 'E'   .
+      ls_message-msgno = '018' .        " Для записи & бухгалтерский документ не создан. & & &
+      ls_message-msgv1 = ls_output-bukrs && ':' && ls_output-matnr && ':' && lv_c_spmon.
+      ls_message-msgv2 = 'Сначала выполните проводку бух.документа'(045).
+      ls_message-msgv3 = space.
+      ls_message-msgv4 = space.
+
+      MESSAGE e018(zmm2) WITH ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4 INTO sy-msgli.
+
+      _add_bapi_message:
+        et_return ls_message-msgty ls_message-msgno ls_message-msgid
+          ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+      CONTINUE.
+
+* -- Ошибка
+    ELSEIF ( NOT ls_output-gjahr_fi IS INITIAL OR     " Бухгалтерский документ сторнирован
+             NOT ls_output-belnr_fi IS INITIAL )  AND
+           ( NOT ls_output-gjahr_st IS INITIAL OR
+             NOT ls_output-belnr_st IS INITIAL ) .
+      ls_message-msgid = 'ZMM2'.
+      ls_message-msgty = 'E'   .
+      ls_message-msgno = '019' .        " Для записи & бухгалтерский документ & сторнирован & &
+      ls_message-msgv1 = ls_output-bukrs    && ':' && ls_output-matnr && ':' && lv_c_spmon.
+      ls_message-msgv2 = ls_output-belnr_fi && '/' && ls_output-gjahr_fi.
+      ls_message-msgv3 = ls_output-belnr_st && '/' && ls_output-gjahr_st.
+      ls_message-msgv4 = space.
+
+      MESSAGE e019(zmm2) WITH ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4 INTO sy-msgli.
+
+      _add_bapi_message:
+        et_return ls_message-msgty ls_message-msgno ls_message-msgid
+          ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+      CONTINUE.
+    ENDIF.
+
+    READ TABLE lt_zmmcorr16 INTO ls_zmmcorr16_db
+      WITH TABLE KEY  mandt = sy-mandt
+                      bukrs = p_bukrs
+                      matnr = ls_output-matnr
+                      spmon = ls_output-spmon
+                      lifnr = ls_output-lifnr.
+    IF sy-subrc = 0.
+      ls_zmmcorr16_db-stock_16_fin_kor = ls_output-stock_16_fin_kor.
+
+    ELSE.
+* -- Ошибка
+      ls_message-msgid = 'ZMM2'.
+      ls_message-msgty = 'E'   .
+      ls_message-msgno = '016' .        " Запись & отсутствует в БД &. & &
+      ls_message-msgv1 = ls_output-bukrs && ':' && ls_output-matnr && ':' && lv_c_spmon.
+      ls_message-msgv2 = 'ZMMCORR16'.
+      ls_message-msgv3 = 'Обновление невозможно.'(047).
+      ls_message-msgv4 = space.
+
+      MESSAGE e016(zmm2) WITH ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4 INTO sy-msgli.
+
+      _add_bapi_message:
+        et_return ls_message-msgty ls_message-msgno ls_message-msgid
+          ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+      CONTINUE.
+    ENDIF.
+
+    "-- Обновление поля STOCK_16_FIN_KOR корреспондирующей записи
+    TRY.
+        UPDATE zmmcorr16
+          SET stock_16_fin_kor  = ls_zmmcorr16_db-stock_16_fin_kor
+          WHERE  bukrs =  ls_zmmcorr16_db-bukrs AND
+                 matnr =  ls_zmmcorr16_db-matnr AND
+                 spmon =  ls_zmmcorr16_db-spmon AND
+                 lifnr =  ls_zmmcorr16_db-lifnr.
+        IF sy-subrc = 0.
+          IF ic_allmsg2jrn = abap_true.
+            ls_message-msgid = 'ZMM2'.      " Успешное обновлене данных в БД
+            ls_message-msgty = 'S'   .
+            ls_message-msgno = '013' .      " Значение &4 успешно обновлено в БД &1, (ключ &2&3)
+            ls_message-msgv1 = 'ZMMCORR16'.
+            ls_message-msgv2 = ls_output-bukrs    && ':' && ls_output-matnr && ':' && lv_c_spmon.
+            ls_message-msgv3 = space.
+            ls_message-msgv4 = 'STOCK_16_FIN_KOR' && '=' && ls_zmmcorr16_db-stock_16_fin_kor.
+
+            MESSAGE e013(zmm2) WITH ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4 INTO sy-msgli.
+
+            _add_bapi_message:
+              et_return ls_message-msgty ls_message-msgno ls_message-msgid
+                ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+          ENDIF.
+        ELSE.
+          ec_error = abap_true.
+          ls_message-msgid = 'ZMM2'.        " Ошибка обновления данных в БД
+          ls_message-msgty = 'E'   .
+          ls_message-msgno = '014' .        " Ошибка при сохранении в БД &1, (ключ &2&3) &4
+          ls_message-msgv1 = 'ZMMCORR16'.
+          ls_message-msgv2 = ls_output-bukrs    && ':' && ls_output-matnr && ':' && lv_c_spmon.
+          ls_message-msgv3 = space.
+          ls_message-msgv4 = space.
+
+          MESSAGE e014(zmm2) WITH ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4 INTO sy-msgli.
+
+          _add_bapi_message:
+            et_return ls_message-msgty ls_message-msgno ls_message-msgid
+              ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+          EXIT.
+        ENDIF.
+
+      CATCH cx_root INTO lr_cx_root         ##CATCH_ALL.
+        lv_s_msgtext = lr_cx_root->get_text( ).
+        ec_error = abap_true.
+        MESSAGE lv_s_msgtext TYPE 'I' DISPLAY LIKE 'E'.
+        EXIT.
+    ENDTRY.
+  ENDLOOP.
+
+  IF ic_commit = abap_true.
+    CASE ec_error.
+      WHEN abap_true.
+        ROLLBACK WORK .
+        MESSAGE e024(zmm2) WITH 'Обновление данных БД отменено'(058) space space space INTO sy-msgli.
+        _add_bapi_message et_return 'E' '024' 'ZMM2' sy-msgv1 space space space.
+      WHEN OTHERS.
+        COMMIT WORK AND WAIT.
+        WAIT UP TO 1 SECONDS.
+    ENDCASE.
+  ENDIF.
+
+ENDFORM.                    " SAVE_KOR16_VAL
+
+*&---------------------------------------------------------------------*
+*&      Form  POST_KOR16_DOCS
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+* Использование глобальных переменных
+*  - p_spmon
+*  - p_bukrs
+*  - gv_c_single_lifnr
+*  -...
+*
+* Изменение глобальных переменных
+*  -...
+*----------------------------------------------------------------------*
+FORM post_kor16_docs
+  USING
+    it_output                TYPE           tt_output
+    ic_commit                TYPE           boole_d
+    iv_lifnr                 TYPE           lfa1-lifnr
+    iv_spmon                 TYPE           spmon
+    io_log                   TYPE REF TO    lif_app_log_by_piecemeal
+  RAISING zcx_acc16_write_off.
+* -----------------------------------------------
+  DATA:
+    ls_bapi_accdocpost_if    TYPE           t_bapi_accdocpost_if,
+    ls_key_db                TYPE           t_zmmcorr16_key,
+    lt_key_db                TYPE           tt_zmmcorr16_key.
+  DATA:
+    lv_c_belnr_kor16         TYPE           bkpf-belnr          , " Номер документа корректировки по 16сч.
+    lv_c_gjahr_kor16         TYPE           bkpf-gjahr          , " Год   документа корректировки по 16сч.
+    lv_c_monat_kor16         TYPE           bkpf-monat,
+    lv_c_lifnr               TYPE           lfa1-lifnr          , " Поставщик
+    lv_d_post_date           TYPE           bkpf-budat          , " Дата проводки в документе
+    lv_d_doc_date            TYPE           bkpf-bldat          , " Дата документа
+    lv_c_strn_reas_dummy     TYPE           t041c-stgrd         . " Причина сторно или обратной проводки
+  DATA:
+    lv_s_msgtext             TYPE           string  ##NEEDED,
+    ls_message               TYPE           symsg           ,
+    ls_return                TYPE           bapiret2        ,
+    lv_i_retcode             TYPE           i               ,
+    lv_c_endwhile            TYPE           boole_d
+                              VALUE abap_false.
+
+  DATA:
+    lv_c_belnr_dummy         TYPE           bkpf-belnr,     " Номер сторно док.корр.по 16сч. =<Empty>
+    lv_n_gjahr_dummy         TYPE           bkpf-gjahr,     " Год   сторно док.корр.по 16сч. =<Empty>
+    lv_n_monat_dummy         TYPE           bkpf-monat.
+  DATA                                                      " для записей не попавших в обработку
+    lt_key_db_nopost         TYPE           tt_zmmcorr16_key.
+  DATA:
+    lx_err_bapi TYPE REF TO zcx_acc16_write_off_bapi.
+* -----------------------------------------------
+* инициализация
+*  CLEAR: ec_error, et_return.
+
+  lv_c_lifnr = iv_lifnr.
+
+  WHILE lv_c_endwhile = abap_false.
+    "-- Ввод данных на всплывающем экране
+    PERFORM scr_popup_kor16
+      USING     cc_fc_postkor16       " Режим: Проводка
+                iv_spmon
+      CHANGING  lv_c_lifnr
+                lv_d_post_date
+                lv_d_doc_date
+                lv_c_strn_reas_dummy  " Причина сторно или обратной проводки - заглушка
+                lv_i_retcode.
+    IF lv_i_retcode = ci_retval_w.
+      lv_c_endwhile = abap_true.
+      MESSAGE e024(zmm2) WITH text-062 '' '' '' INTO sy-msgli. " 'Операция отменена пользователем'
+      io_log->add_symsg( ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+    ELSEIF lv_i_retcode > ci_retval_w.
+      lv_c_endwhile = abap_true.
+      MESSAGE e024(zmm2) WITH text-063 '' '' '' INTO sy-msgli. " 'Внутренняя ошибка'
+      io_log->add_symsg( ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+    ENDIF.
+
+    "-- Проверка допустимых значений на всплывающем экране
+    PERFORM scr_popup_kor16_chkval
+      USING     it_output
+                lv_c_lifnr
+                lv_d_post_date
+                lv_d_doc_date
+      CHANGING  lv_i_retcode
+                ls_message.
+    IF lv_i_retcode > ci_retval_w.
+      io_log->add_symsg( ls_message ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+    ENDIF.
+
+    lv_c_endwhile = abap_true.
+  ENDWHILE.
+
+* ----
+* Проверка допустимости проведения корректировки для всех позиций ALV по вендору
+* -- Поиск первой строки уже имеющую НЕ сторнированную корректировку
+  go_bl->check_before_corr16( iv_spmon   = iv_spmon
+                              iv_lifnr   = iv_lifnr
+                              it_outdata = it_output[] ).
+
+* Проведение документов коррекции сальдо 16 сч
+  PERFORM prep_kor16_bapi_data_in
+    USING     it_output
+              p_bukrs
+              iv_spmon
+              lv_c_lifnr
+              lv_d_post_date
+              lv_d_doc_date
+    CHANGING  ls_bapi_accdocpost_if
+              lt_key_db
+              lv_i_retcode
+              ls_message.
+
+  IF lv_i_retcode > ci_retval_w.
+    io_log->add_symsg( ls_message ).
+    RAISE EXCEPTION TYPE zcx_acc16_write_off.
+  ENDIF.
+
+  TRY .
+      TRY .
+          go_bl->bapi_acc_document_post(
+            EXPORTING
+              is_documentheader    = ls_bapi_accdocpost_if-import-s_documentheader
+              is_customercpd       = ls_bapi_accdocpost_if-import-s_customercpd
+              is_contractheader    = ls_bapi_accdocpost_if-import-s_contractheader
+            IMPORTING
+              obj_type             = ls_bapi_accdocpost_if-export-obj_type    " Ссылочная операция
+              obj_key              = ls_bapi_accdocpost_if-export-obj_key    " Ссылочный ключ
+              obj_sys              = ls_bapi_accdocpost_if-export-obj_sys    " Логическая система исходного документа
+            CHANGING
+              ct_accountgl         = ls_bapi_accdocpost_if-tables-t_accountgl
+              ct_accountreceivable = ls_bapi_accdocpost_if-tables-t_accountreceivable
+              ct_accountpayable    = ls_bapi_accdocpost_if-tables-t_accountpayable
+              ct_accounttax        = ls_bapi_accdocpost_if-tables-t_accounttax
+              ct_currencyamount    = ls_bapi_accdocpost_if-tables-t_currencyamount
+              ct_criteria          = ls_bapi_accdocpost_if-tables-t_criteria
+              ct_valuefield        = ls_bapi_accdocpost_if-tables-t_valuefield
+              ct_extension1        = ls_bapi_accdocpost_if-tables-t_extension1
+              ct_return            = ls_bapi_accdocpost_if-tables-t_return
+              ct_paymentcard       = ls_bapi_accdocpost_if-tables-t_paymentcard
+              ct_contractitem      = ls_bapi_accdocpost_if-tables-t_contractitem
+              ct_extension2        = ls_bapi_accdocpost_if-tables-t_extension2
+              ct_realestate        = ls_bapi_accdocpost_if-tables-t_realestate
+              ct_accountwt         = ls_bapi_accdocpost_if-tables-t_accountwt ).
+        CATCH zcx_acc16_write_off_bapi INTO lx_err_bapi.    " Вызов BAPI
+          ls_bapi_accdocpost_if-tables-t_return[] = lx_err_bapi->t_bapiret2[].
+      ENDTRY.
+
+      IF lines( ls_bapi_accdocpost_if-tables-t_return ) > 0.
+        io_log->add_bapiret2_tab( ls_bapi_accdocpost_if-tables-t_return[] ).
+        PERFORM define_bapi_result
+          USING    ls_bapi_accdocpost_if-tables-t_return
+          CHANGING lv_i_retcode
+                   ls_message.
+        IF lv_i_retcode > ci_retval_w.
+          io_log->add_symsg( ls_message ).
+          RAISE EXCEPTION TYPE zcx_acc16_write_off.
+        ELSE.
+          IF ls_bapi_accdocpost_if-export-obj_key IS INITIAL.
+            lv_s_msgtext = 'Не удалось определить номер бух.документа корректировки остатов 16сч.'(076).
+            ls_message = cl_uso_aw_su01=>utils_tfr_strtxt2msg( ).
+            io_log->add_symsg( ls_message ).
+            RAISE EXCEPTION TYPE zcx_acc16_write_off.
+          ELSE.
+            lv_c_belnr_kor16 = ls_bapi_accdocpost_if-export-obj_key(10)  .      "  Номер документа корректировки по 16сч.
+            lv_c_gjahr_kor16 = ls_bapi_accdocpost_if-export-obj_key+14(4).      "  Год   документа корректировки по 16сч.
+            lv_c_monat_kor16 = ls_bapi_accdocpost_if-import-s_documentheader-pstng_date+4(2).      "  Месяц  документа корректировки по 16сч.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+
+* Обновление БД: ZMMCORR16
+* -- строки попавшие в обработку
+      IF lines( lt_key_db ) > 0.
+        LOOP AT lt_key_db INTO ls_key_db.
+          UPDATE zmmcorr16
+            SET belnr_kor16    = lv_c_belnr_kor16
+                gjahr_kor16    = lv_c_gjahr_kor16
+                monat_kor16    = lv_c_monat_kor16
+                belnr_kor16_st = lv_c_belnr_dummy
+                gjahr_kor16_st = lv_n_gjahr_dummy
+                monat_kor16_st = lv_n_monat_dummy
+             WHERE bukrs = ls_key_db-bukrs AND
+                   matnr = ls_key_db-matnr AND
+                   spmon = ls_key_db-spmon AND
+                   lifnr = ls_key_db-lifnr .
+          IF sy-subrc <> 0.
+            ls_message-msgv2 = |{ ls_key_db-bukrs }:{ ls_key_db-matnr }:{ ls_key_db-spmon }|.
+            MESSAGE e014(zmm2) WITH 'ZMMCORR16' ls_message-msgv2 space space INTO sy-msgli.
+            io_log->add_symsg( ).
+            EXIT.
+* {RT0K917934 ABRUKHOV  RTKDEVSAP-205 CQ 60599 Доработка Транзакций ZCORR* - 1
+          ELSE.
+            DATA: wa_hist TYPE zmmcorr16_hist.
+
+            SELECT SINGLE * FROM zmmcorr16 INTO CORRESPONDING FIELDS OF wa_hist
+               WHERE bukrs = ls_key_db-bukrs AND
+                     matnr = ls_key_db-matnr AND
+                     spmon = ls_key_db-spmon AND
+                     lifnr = ls_key_db-lifnr.
+            IF sy-subrc = 0.
+              wa_hist-belnr_kor16    = lv_c_belnr_kor16.
+              wa_hist-gjahr_kor16    = lv_c_gjahr_kor16.
+              wa_hist-monat_kor16    = lv_c_monat_kor16.
+              wa_hist-belnr_kor16_st = lv_c_belnr_dummy.
+              wa_hist-gjahr_kor16_st = lv_n_gjahr_dummy.
+              wa_hist-monat_kor16_st = lv_n_monat_dummy.
+              wa_hist-aenam          = sy-uname.
+              wa_hist-aedat          = sy-datum.
+              wa_hist-aetim          = sy-uzeit.
+              INSERT INTO zmmcorr16_hist VALUES wa_hist.
+            ENDIF.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+
+* -- строки НЕ попавшие в обработку
+      PERFORM prep_kor16_key_db_nopost
+        USING    it_output
+                 p_bukrs
+                 iv_spmon
+                 lv_c_lifnr
+        CHANGING lt_key_db_nopost.
+
+      IF lines( lt_key_db_nopost ) > 0.
+
+        CLEAR: lv_c_belnr_dummy, lv_n_gjahr_dummy, lv_n_monat_dummy.
+        LOOP AT lt_key_db_nopost INTO ls_key_db.
+          UPDATE zmmcorr16
+            SET stock_16_fin_kor = 0
+                belnr_kor16      = lv_c_belnr_dummy
+                gjahr_kor16      = lv_n_gjahr_dummy
+                monat_kor16      = lv_n_monat_dummy
+                belnr_kor16_st   = lv_c_belnr_dummy
+                gjahr_kor16_st   = lv_n_gjahr_dummy
+                monat_kor16_st   = lv_n_monat_dummy
+             WHERE bukrs = ls_key_db-bukrs AND
+                   matnr = ls_key_db-matnr AND
+                   spmon = ls_key_db-spmon AND
+                   lifnr = ls_key_db-lifnr.
+          IF sy-subrc <> 0.
+            ls_message-msgv2 = |{ ls_key_db-bukrs }:{ ls_key_db-matnr }:{ ls_key_db-spmon }|.
+            MESSAGE e014(zmm2) WITH 'ZMMCORR16' ls_message-msgv2 space space INTO sy-msgli. " Ошибка при сохранении в БД &1, (ключ &2&3) &4
+            io_log->add_symsg( ).
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+      ENDIF.
+
+      IF ic_commit = abap_true.
+        TRY .
+            ls_return = go_bl->bapi_commit( abap_true ).
+          CATCH zcx_acc16_write_off_bapi INTO lx_err_bapi.    " Вызов BAPI
+            READ TABLE lx_err_bapi->t_bapiret2[] INTO ls_return
+              WITH KEY type = 'E'.
+        ENDTRY.
+      ENDIF.
+    CATCH zcx_acc16_write_off.
+      IF ic_commit = abap_true.
+        ls_return = go_bl->bapi_rollback( ).
+      ENDIF.
+  ENDTRY.
+
+* Проведение документов коррекции сальдо 16 сч
+  IF ic_commit = abap_true.
+    IF NOT ls_return IS INITIAL.
+      IF 'ISW' NS ls_return-type.
+        ROLLBACK WORK.
+        ls_message = cl_uso_aw_su01=>utils_tfr_bapiret2_2msg( ls_return ).
+        io_log->add_symsg( ls_message ).
+        RAISE EXCEPTION TYPE zcx_acc16_write_off.
+      ENDIF.
+      io_log->add_symsg( ls_message ).
+    ENDIF.
+  ENDIF.
+
+ENDFORM.                    " POST_KOR16_DOCS
+
+* ---- { RT0K915737.ERP-259
+*&---------------------------------------------------------------------*
+*&      Form  SCR_POPUP_KOR16
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+* Использование глобальных переменных
+*  - gv_c_single_lifnr
+*  -...
+*
+* Изменение глобальных переменных
+*  -...
+*----------------------------------------------------------------------*
+FORM scr_popup_kor16
+  USING
+    ic_mode                  TYPE           c
+    id_spmon                 TYPE           spmon
+  CHANGING
+    ec_lifnr                 TYPE           c
+    ed_post                  TYPE           d
+    ed_doc                   TYPE           d
+    ec_stgrd                 TYPE           c   " ----   RT0K916270.RTKDEVSAP-33
+    ei_retcode               TYPE           i.
+*
+* -----------------------------------------------
+  DATA:
+    ls_fields                TYPE           sval,
+    lt_fields                TYPE TABLE OF  sval,
+    lv_d_last_date           TYPE           datum,
+    lv_c_retcode             TYPE           c.
+  DATA:
+    lv_s_title               TYPE           string.
+*
+* -----------------------------------------------
+* инициализация
+  CLEAR:  ei_retcode, ec_stgrd.
+
+  PERFORM get_last_day_of_period USING     id_spmon
+                                 CHANGING  lv_d_last_date.
+* ----
+  CASE ic_mode.
+
+* Режим - Проводка коррктировки сальдо по Корр16
+* -----------------------------------------------
+    WHEN cc_fc_postkor16.
+* -- Начальные значения на вспл.экране
+
+      IF ed_post  IS INITIAL. ed_post = sy-datum.       ENDIF.
+      IF ed_doc   IS INITIAL. ed_doc  = lv_d_last_date. ENDIF.
+      CLEAR ec_stgrd.
+      lv_s_title = 'Введите доп.параметры проводки коррекции сальдо 16сч.'(060).
+
+* -- Формирование доп.параметров на всплывающем экране
+      DO 3 TIMES.
+        CLEAR ls_fields.
+        CASE sy-index.
+          WHEN 1.                                     " параметр во всех режимах
+            ls_fields-tabname   = 'LFA1' .
+            ls_fields-fieldname = 'LIFNR'.
+*            IF gv_c_single_lifnr IS INITIAL.
+*              ls_fields-field_obl  = abap_true.
+*              ls_fields-field_attr = space    .         " ''-  Стандартная яркость, готово к вводу
+*            ELSE.
+            ls_fields-field_obl  = abap_false.
+            ls_fields-field_attr = '02'      .        " '02'- Стандартная яркость, не готово к вводу
+*            ENDIF.
+            ls_fields-value     = ec_lifnr   .
+          WHEN 2.                                     " параметр во всех режимах
+            ls_fields-field_obl  = abap_true.
+            ls_fields-field_attr = space    .         " ''-  Стандартная яркость, готово к вводу
+            ls_fields-tabname    = 'BKPF'   .
+            ls_fields-fieldname  = 'BUDAT'  .
+            ls_fields-value      = ed_post  .
+          WHEN 3.
+            ls_fields-tabname   = 'BKPF'   .
+            ls_fields-fieldname = 'BLDAT'  .
+            ls_fields-field_attr = '02'    .
+            ls_fields-field_obl = abap_true.
+            ls_fields-value     = ed_doc   .
+        ENDCASE.
+        APPEND ls_fields TO lt_fields.
+      ENDDO.
+
+* Режим - Сторно проводки коррктировки сальдо по Корр16
+* -----------------------------------------------
+    WHEN cc_fc_strnkor16.
+* -- Начальные значения на вспл.экране
+      IF ed_post  IS INITIAL. ed_post = sy-datum.       ENDIF.
+      IF ed_doc   IS INITIAL. ed_doc  = lv_d_last_date. ENDIF.
+      IF ec_stgrd IS INITIAL. ec_stgrd = '04'.          ENDIF.  " по умолч. - 03 ('Фактическое сторно в текущем периоде')
+
+      lv_s_title = 'Введите доп.параметры проводки сторно проводки коррекции сальдо 16сч.'(064).
+
+* -- Формирование доп.параметров на всплывающем экране
+      DO 4 TIMES.
+        CLEAR ls_fields.
+        CASE sy-index.
+          WHEN 1.
+            ls_fields-tabname    = 'LFA1'    .              " Поставщик
+            ls_fields-fieldname  = 'LIFNR'   .
+*            IF gv_c_single_lifnr IS INITIAL.
+*              ls_fields-field_obl  = abap_true.
+*              ls_fields-field_attr = space    .             " ''-  Стандартная яркость, готово к вводу
+*            ELSE.
+            ls_fields-field_obl  = abap_false.
+            ls_fields-field_attr = '02'      .            " '02'- Стандартная яркость, не готово к вводу
+*            ENDIF.
+            ls_fields-value      = ec_lifnr  .
+          WHEN 2.                                           " Дата документа
+            ls_fields-tabname   = 'BKPF'   .
+            ls_fields-fieldname = 'BUDAT'  .
+            ls_fields-field_obl = abap_true.
+            ls_fields-value     = ed_post  .
+          WHEN 3.
+            ls_fields-tabname    = 'BKPF'    .               " Дата проводки
+            ls_fields-fieldname  = 'BLDAT'   .
+            ls_fields-field_obl  = abap_false.
+            ls_fields-field_attr = '02'      .        " '02'  (Стандартная яркость, не готово к вводу)
+            ls_fields-value     = ed_doc     .
+          WHEN 4.
+            CHECK ic_mode       = cc_fc_strnkor16       .  " Причина сторно
+            ls_fields-tabname   = 'TRLS_REVERSAL_REASON'.
+            ls_fields-fieldname = 'STGRD'               .
+            ls_fields-field_obl = abap_true             .
+            ls_fields-value     = ec_stgrd              .
+        ENDCASE.
+        APPEND ls_fields TO lt_fields.
+      ENDDO.
+  ENDCASE.
+
+
+* Вызов всплывающего экрана
+  CALL FUNCTION 'POPUP_GET_VALUES'
+    EXPORTING
+      popup_title = lv_s_title
+    IMPORTING
+      returncode  = lv_c_retcode
+    TABLES
+      fields      = lt_fields
+    EXCEPTIONS
+      OTHERS      = 2.
+  IF sy-subrc IS NOT INITIAL.       " ошибка ФМ
+    MESSAGE ID sy-msgid TYPE cc_msgty_i  NUMBER sy-msgno
+      WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4
+      DISPLAY LIKE sy-msgid.
+    ei_retcode = ci_retval_e.
+    RETURN.
+  ELSEIF lv_c_retcode EQ 'A'.       " Отмена диалового окна
+    ei_retcode = ci_retval_w.
+    RETURN.
+  ENDIF.
+
+* Возврат значений
+  READ TABLE lt_fields INTO ls_fields               " Поставщик
+    WITH KEY tabname   = 'LFA1'
+             fieldname = 'LIFNR'.
+  IF sy-subrc = 0.
+    ec_lifnr = ls_fields-value.
+  ENDIF.
+
+  READ TABLE lt_fields INTO ls_fields             " Дата проводки
+    WITH KEY  tabname   = 'BKPF'
+              fieldname = 'BUDAT'.
+  IF sy-subrc = 0.
+    ed_post = ls_fields-value.
+  ENDIF.
+
+  READ TABLE lt_fields INTO ls_fields               " Дата документа
+    WITH KEY  tabname   = 'BKPF'
+              fieldname = 'BLDAT'.
+  IF sy-subrc = 0.
+    ed_doc = ls_fields-value.
+  ENDIF.
+
+  DO 1 TIMES.
+    CHECK ic_mode = cc_fc_strnkor16.                " параметр в режиме "Cторно Кор16"
+    READ TABLE lt_fields INTO ls_fields             " Причина сторно
+      WITH KEY  tabname   = 'TRLS_REVERSAL_REASON'
+                fieldname = 'STGRD'.
+    CHECK sy-subrc = 0.
+    ec_stgrd = ls_fields-value.
+  ENDDO.
+
+ENDFORM.                    " SCR_POPUP_KOR16
+
+*&---------------------------------------------------------------------*
+*&      Form  SCR_POPUP_KOR16_CHKVAL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM scr_popup_kor16_chkval
+  USING
+    it_output                TYPE           tt_output
+    ic_lifnr                 TYPE           c         ##NEEDED
+    id_post                  TYPE           d         ##NEEDED
+    id_doc                   TYPE           d         ##NEEDED
+  CHANGING
+    ei_retcode               TYPE           i
+    es_message               TYPE           symsg.
+* -----------------------------------------------
+  DATA:
+    lv_c_lifnr               TYPE           lfa1-lifnr,
+    lv_c_boole               TYPE           c,
+    lv_c_no_rows             TYPE           c,
+    ls_output                TYPE           t_output .
+  DATA row_id TYPE string.
+* -----------------------------------------------
+* Инициализация
+  CLEAR: ei_retcode, es_message.
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+    EXPORTING
+      input  = ic_lifnr
+    IMPORTING
+      output = lv_c_lifnr.
+
+* Проверка наличия введеного Поставщика в строках ALV
+  DO 1 TIMES.
+    CHECK ei_retcode < ci_retval_e.
+
+    lv_c_no_rows = abap_true.
+    LOOP AT it_output INTO ls_output.
+      PERFORM chk_alvrow_post_allow_kor16
+        USING     ic_lifnr
+                  ls_output
+        CHANGING  lv_c_boole.
+      CHECK lv_c_boole = abap_true.
+      lv_c_no_rows = abap_true.
+      CLEAR lv_c_no_rows.
+    ENDLOOP.
+    IF lv_c_no_rows = abap_true.
+      IF ei_retcode < ci_retval_e. ei_retcode = ci_retval_e. ENDIF.
+      row_id = |{ ls_output-spmon+4(2) }.{ ls_output-spmon(4) }/{ lv_c_lifnr }/{ ls_output-matnr }|.
+      MESSAGE e013(zmm_acc16_write_off) WITH row_id INTO sy-msgli.
+      EXIT.
+    ENDIF.
+  ENDDO.
+
+ENDFORM.                    " SCR_POPUP_KOR16_CHKVAL
+
+*&---------------------------------------------------------------------*
+*&      Form  PREP_KOR16_BAPI_DATA_IN
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM prep_kor16_bapi_data_in
+  USING
+    it_output                TYPE           tt_output
+    ic_bukrs                 TYPE           bukrs
+    id_period                TYPE           spmon
+    ic_lifnr                 TYPE           c
+    id_post                  TYPE           d
+    id_doc                   TYPE           d
+  CHANGING
+    es_bapi_if_data          TYPE           t_bapi_accdocpost_if
+    et_key_db                TYPE           tt_zmmcorr16_key
+    ei_retcode               TYPE           i
+    es_message               TYPE           symsg.
+*
+* -----------------------------------------------
+  DATA:
+    lv_i_posnr               TYPE           i         ,
+    lv_c_period_txt(7)       TYPE           c         ,
+    lv_s_msgtext             TYPE           string    ,
+    lv_c_lifnr               TYPE           lfa1-lifnr  ##NEEDED.
+  DATA:
+    ls_key_db                TYPE           t_zmmcorr16_key,
+    ls_accountgl             TYPE LINE OF   t_bapi_accdocpost_t-t_accountgl,
+    ls_currencyamount        TYPE LINE OF   t_bapi_accdocpost_t-t_currencyamount.
+
+  DATA:
+    ls_output                TYPE           t_output,
+    lv_c_boole               TYPE           c       .
+
+* -----------------------------------------------
+* Инициализация
+  CLEAR: ei_retcode, es_message, es_bapi_if_data, et_key_db.
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_OUTPUT'
+    EXPORTING
+      input  = ic_lifnr
+    IMPORTING
+      output = lv_c_lifnr.
+  WRITE: id_period TO lv_c_period_txt.
+
+* ---
+* Проверка наличия данных для создания документов коррекции сальдо 16сч.
+  DO 1 TIMES.
+    CHECK ei_retcode < ci_retval_e.
+    LOOP AT it_output INTO ls_output .
+* ----
+      AT FIRST    ##LOOP_AT_OK.
+* ------ Create Header
+        es_bapi_if_data-import-s_documentheader-neg_postng = abap_false.   " Красное сальдо OFF
+        es_bapi_if_data-import-s_documentheader-username   = sy-uname .
+        es_bapi_if_data-import-s_documentheader-bus_act    = 'RFBU'   .
+        es_bapi_if_data-import-s_documentheader-comp_code  = ic_bukrs .
+        es_bapi_if_data-import-s_documentheader-doc_date   = id_doc   .
+        es_bapi_if_data-import-s_documentheader-pstng_date = id_post  .
+        es_bapi_if_data-import-s_documentheader-doc_type   = 'AB'     .
+        es_bapi_if_data-import-s_documentheader-ref_doc_no  = lv_c_lifnr.
+        CONCATENATE: 'Кор16'(077) lv_c_period_txt
+         INTO es_bapi_if_data-import-s_documentheader-header_txt SEPARATED BY space.
+      ENDAT.
+
+      PERFORM chk_alvrow_post_allow_kor16
+        USING     ic_lifnr
+                  ls_output
+        CHANGING  lv_c_boole.
+      CHECK lv_c_boole = abap_true.
+
+      IF ( NOT ls_output-gjahr_kor16    IS INITIAL OR     " Уже имеется несторнированный документ корректировки KOR16
+           NOT ls_output-belnr_kor16    IS INITIAL ) AND
+         (     ls_output-belnr_kor16_st IS INITIAL OR
+               ls_output-gjahr_kor16_st IS INITIAL ).
+
+        CONTINUE.
+      ELSEIF ( ls_output-gjahr_fi IS INITIAL AND          " Бухгалтерский документ не создан
+               ls_output-belnr_fi IS INITIAL )  AND
+             ( ls_output-gjahr_st IS INITIAL AND
+               ls_output-belnr_st IS INITIAL ) .
+        CONTINUE.
+      ELSEIF ( NOT ls_output-gjahr_fi IS INITIAL OR       " Бухгалтерский документ сторнирован
+               NOT ls_output-belnr_fi IS INITIAL )  AND
+             ( NOT ls_output-gjahr_st IS INITIAL OR
+               NOT ls_output-belnr_st IS INITIAL ) .
+        CONTINUE.
+      ENDIF.
+
+* ------ Create positions
+      lv_i_posnr = lv_i_posnr + 1.
+* -------- ACCOUNTGL.1601010000
+      ls_accountgl-itemno_acc = lv_i_posnr     .                " № позиции документа
+      ls_accountgl-comp_code  = ic_bukrs       .                " БЕ
+      ls_accountgl-gl_account = '1601010000'   .                " Счет
+      ls_accountgl-material   = ls_output-matnr.                " Артикул
+      ls_accountgl-plant      = 'Z500'         .                "
+      APPEND ls_accountgl TO es_bapi_if_data-tables-t_accountgl.
+* -------- CURRENCYAMOUNT.1601010000
+      ls_currencyamount-itemno_acc = lv_i_posnr.                " " № позиции документа
+      ls_currencyamount-curr_type  = '00'.                      " Тип Валюты
+      ls_currencyamount-currency   = 'RUB'.                     " Наименование Валюты
+      ls_currencyamount-amt_doccur = ls_output-stock_16_fin_kor. " Значение корректировки
+      APPEND ls_currencyamount TO es_bapi_if_data-tables-t_currencyamount.
+
+      lv_i_posnr = lv_i_posnr + 1.
+* -------- ACCOUNTGL.9002010000
+      ls_accountgl-itemno_acc = lv_i_posnr     .                        " № позиции документа
+      ls_accountgl-comp_code  = ic_bukrs       .                        " БЕ
+      ls_accountgl-gl_account = '9002010000'   .                        " Счет
+      ls_accountgl-material   = ls_output-matnr.                        " Артикул
+      ls_accountgl-plant      = 'Z500'         .                        "
+      APPEND ls_accountgl TO es_bapi_if_data-tables-t_accountgl.
+* -------- CURRENCYAMOUNT.9002010000
+      ls_currencyamount-itemno_acc = lv_i_posnr.                        " № позиции документа
+      ls_currencyamount-curr_type  = '00'      .                        " Тип Валюты
+      ls_currencyamount-currency   = 'RUB'     .                        " Наименование Валюты
+      ls_currencyamount-amt_doccur = -1 * ls_output-stock_16_fin_kor .  " Значение корректировки (отриц.знач.)
+      APPEND ls_currencyamount TO es_bapi_if_data-tables-t_currencyamount.
+
+* ------- Формирование ключей записей обновления БД: ZMMCORR16
+      MOVE-CORRESPONDING ls_output TO ls_key_db.          " MATNR, ...
+      ls_key_db-bukrs = ic_bukrs.
+      ls_key_db-spmon = id_period.
+      ls_key_db-lifnr = ls_output-lifnr.
+      APPEND ls_key_db TO et_key_db.
+    ENDLOOP.
+
+    IF lines( es_bapi_if_data-tables-t_accountgl ) = 0.
+      CLEAR: es_bapi_if_data,  et_key_db.             " Очистка выходных данных
+      IF ei_retcode < ci_retval_e. ei_retcode = ci_retval_e. ENDIF.
+      lv_s_msgtext = 'Отсутствуют данные для создания документов коррекции сальдо 16сч.'(065).
+      cl_message_helper=>set_msg_vars_for_clike( lv_s_msgtext ).  " Set message to SY-MSG*
+      MOVE-CORRESPONDING sy TO es_message.
+      es_message-msgty = cc_msgty_e.                              " Error
+      EXIT.
+    ENDIF.
+  ENDDO.
+
+ENDFORM.                    " PREP_KOR16_BAPI_DATa_IN
+
+*&---------------------------------------------------------------------*
+*&      Form  DEFINE_BAPI_RESULT
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM define_bapi_result
+  USING
+    it_return                TYPE           bapiret2_tab
+  CHANGING
+    ei_retcode               TYPE           i
+    es_message               TYPE           symsg.
+*
+* -----------------------------------------------
+  DATA:
+    ls_return                TYPE           bapiret2.
+*
+* -----------------------------------------------
+  CLEAR: ei_retcode, es_message.
+
+  DO 1 TIMES.
+    CHECK lines( it_return ) > 0.
+    LOOP AT it_return INTO ls_return WHERE type = cc_msgty_x OR
+                                           type = cc_msgty_a OR
+                                           type = cc_msgty_e.
+      ei_retcode = ci_retval_e.
+      es_message = cl_uso_aw_su01=>utils_tfr_bapiret2_2msg( ls_return ).
+      RETURN.
+    ENDLOOP.
+
+    CHECK sy-subrc <> 0.
+    LOOP AT it_return  INTO ls_return WHERE type = cc_msgty_w.
+      ei_retcode = ci_retval_w.
+      es_message = cl_uso_aw_su01=>utils_tfr_bapiret2_2msg( ls_return ).
+      RETURN.
+    ENDLOOP.
+
+    CHECK sy-subrc <> 0.
+    LOOP AT it_return  INTO ls_return WHERE type = cc_msgty_i OR
+                                            type = cc_msgty_s.
+      ei_retcode = ci_retval_s.
+      es_message = cl_uso_aw_su01=>utils_tfr_bapiret2_2msg( ls_return ).
+      RETURN.
+    ENDLOOP.
+  ENDDO.
+ENDFORM.                    " DEFINE_BAPI_RESULT
+
+*&---------------------------------------------------------------------*
+*&      Form  CANCEL_POSTING_KOR16_DOCS
+*&---------------------------------------------------------------------*
+* Использование глобальных переменных
+*  - p_spmon
+*  - p_bukrs
+*  -...
+*
+* Изменение глобальных переменных
+*  -...
+*----------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM cancel_posting_kor16_docs
+  USING
+    ic_commit                TYPE           boole_d
+    iv_lifnr                 TYPE           lfa1-lifnr
+    iv_spmon                 TYPE           spmon
+    io_log                   TYPE REF TO    lif_app_log_by_piecemeal
+  CHANGING
+    et_output                TYPE           tt_output
+    es_ctrl_alv              TYPE           t_ctrl_alv  ##NEEDED
+*    ec_error                 TYPE           boole_d
+    ev_s_msgtext             TYPE           string
+*    et_return                TYPE           bapirettab
+  RAISING zcx_acc16_write_off .
+*
+* -----------------------------------------------
+
+  DATA:
+    lv_c_tabix(11)           TYPE           c,
+    ls_output                TYPE           t_output  ,
+    lt_output                TYPE           tt_output ,
+    lv_c_boole               TYPE           c,
+    lv_d_doc_date*           TYPE           bkpf-bldat       , " Дата документа - временн.хранение
+    lv_c_doc_date_flg        TYPE           boole_d          . " флаг определения Дата документа в цикле
+
+  DATA:
+    lv_c_lifnr               TYPE           lfa1-lifnr          , " Поставщик
+    lv_d_post_date           TYPE           bkpf-budat          , " Дата проводки в документе
+    lv_d_doc_date            TYPE           bkpf-bldat          , " Дата документа
+    lv_c_strn_reas           TYPE           t041c-stgrd         . " Причина сторно или обратной проводки
+  DATA:
+    lt_bapi_accdocrevpost_if TYPE           tt_bapi_accdocrevpost_if,
+    ls_bapi_accdocrevpost_if TYPE           t_bapi_accdocrevpost_if .
+  DATA:
+    lv_s_msgtext             TYPE           string    ##NEEDED,
+    ls_message               TYPE           symsg             ,
+    ls_return                TYPE           bapiret2          ,
+    lv_i_retcode             TYPE           i                 ,
+    lv_c_endwhile            TYPE           boole_d   VALUE abap_false.
+  DATA:
+    lx_err_bapi TYPE REF TO zcx_acc16_write_off_bapi,
+    l_error     TYPE boole_d .
+
+  FIELD-SYMBOLS:
+   <fs_bapi_accdocrevpost_if> TYPE          t_bapi_accdocrevpost_if.
+*
+* -----------------------------------------------
+* инициализация
+  CLEAR: ev_s_msgtext. " ec_error, et_return,
+*   es_ctrl_alv - не очищается !!!
+*   et_output   - не очищается !!!
+
+  lv_c_lifnr = iv_lifnr.
+
+* Проверка допустимости сторно для выделенных строк
+  LOOP AT et_output INTO ls_output.
+    WRITE sy-tabix  TO lv_c_tabix. CONDENSE lv_c_tabix.
+    PERFORM chk_alvrow_cancel_allow_kor16
+      USING     lv_c_lifnr
+                ls_output
+      CHANGING  lv_c_boole.
+    CHECK lv_c_boole = abap_true.
+
+    IF ls_output-belnr_kor16 IS INITIAL OR                  " ...наличие документа проводки корр16сч
+       ls_output-gjahr_kor16 IS INITIAL.
+*        ec_error = abap_true.
+*      ls_return-id         = 'ZMM2'    .
+*      ls_return-type       = cc_msgty_e.
+*      ls_return-number     = '038'     . " Стр.&, Сторнирование коррекции сальдо 16сч. & & &
+*      ls_return-message_v1 = lv_c_tabix.
+*      ls_return-message_v2 = 'возможно для скорректированных позиций'(084).
+*      ls_return-message_v3 = space.
+*      ls_return-message_v4 = space.
+      MESSAGE e038(zmm2) WITH lv_c_tabix 'возможно для скорректированных позиций'(084) '' '' INTO sy-msgli.
+*        APPEND ls_return TO et_return.
+      io_log->add_symsg( ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+    ELSEIF NOT ls_output-belnr_kor16_st IS INITIAL OR       " ...отсутствие документа сторно для проводки корр16сч
+           NOT ls_output-gjahr_kor16_st IS INITIAL.
+*        ec_error = abap_true.
+*      ls_return-id         = 'ZMM2'    .
+*      ls_return-type       = cc_msgty_e.
+*      ls_return-number     = '038'     . " Стр.&, Сторнирование коррекции сальдо 16сч. & & &
+      ls_return-message_v1 = lv_c_tabix.
+      ls_return-message_v2 = 'уже выполнено'(083).
+      ls_return-message_v3 = '(' && 'фин.док.' && ':' && ls_output-gjahr_kor16_st && '/' && ls_output-belnr_kor16_st.
+*      ls_return-message_v4 = space.
+      MESSAGE e038(zmm2) WITH ls_return-message_v1 ls_return-message_v2 ls_return-message_v3 '' INTO sy-msgli.
+*        APPEND ls_return TO et_return.
+      io_log->add_symsg( ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+    ENDIF.
+*      CHECK ec_error = abap_false.
+    APPEND ls_output TO lt_output.
+  ENDLOOP.
+
+  IF lines( lt_output[] ) = 0.
+*      ec_error      = abap_true.
+    ev_s_msgtext  = 'Нет данных для обработки коррекции сальдо 16сч'(081).
+    MESSAGE e024(zmm2) WITH ev_s_msgtext '' '' '' INTO sy-msgli.
+    io_log->add_symsg( ).
+    RETURN.
+  ENDIF.
+
+* -- предзаполнение поля в доп.экране (BKPF-BUDAT)
+  lv_d_post_date = sy-datum.
+  LOOP AT lt_output INTO ls_output .
+* -- предзаполнение поля в доп.экране (BKPF-BLDAT)
+    DO 1 TIMES.           " определение единственности значения BKPF-BLDAT в наборе для автоподстановки в поле "Дата документа" во вспл.окне
+      CASE lv_c_doc_date_flg.
+        WHEN abap_false.            " -- BKPF-BLDAT НЕ определялось в цикле
+          CHECK lv_d_doc_date IS INITIAL.
+          SELECT SINGLE bldat INTO lv_d_doc_date
+            FROM bkpf
+            WHERE bukrs = ls_output-bukrs       AND
+                  belnr = ls_output-belnr_kor16 AND
+                  gjahr = ls_output-gjahr_kor16.
+          CHECK sy-subrc = 0.
+          lv_c_doc_date_flg = abap_true.
+
+        WHEN abap_true.             " -- BKPF-BLDAT уже определялось в цикле
+          CHECK NOT lv_d_doc_date IS INITIAL.       " ---- Если более 2-х разных дат документа -
+          SELECT SINGLE budat INTO lv_d_doc_date*   " ---- убирается автоподстановка в поле "Дата документа"
+            FROM bkpf
+            WHERE bukrs = ls_output-bukrs       AND
+                  belnr = ls_output-belnr_kor16 AND
+                  gjahr = ls_output-gjahr_kor16.
+          CHECK sy-subrc       =  0 AND
+                lv_d_doc_date* <> lv_d_doc_date.
+          CLEAR lv_d_doc_date.
+      ENDCASE.
+    ENDDO.
+  ENDLOOP.
+
+  WHILE lv_c_endwhile = abap_false.
+    "-- Ввод данных на всплывающем экране
+    PERFORM scr_popup_kor16
+      USING     cc_fc_strnkor16         " Режим: Сторнирование
+                iv_spmon
+      CHANGING  lv_c_lifnr
+                lv_d_post_date
+                lv_d_doc_date
+                lv_c_strn_reas          " Причина сторно или обратной проводки 	" ----   RT0K916270.RTKDEVSAP-33
+                lv_i_retcode.
+    IF lv_i_retcode = ci_retval_w.
+      lv_c_endwhile = abap_true.
+*        ec_error = abap_true.
+      ev_s_msgtext  = 'Операция отменена пользователем'(062).
+      MESSAGE e024(zmm2) WITH ev_s_msgtext '' '' '' INTO sy-msgli.
+      io_log->add_symsg( ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+    ELSEIF lv_i_retcode > ci_retval_w.
+      lv_c_endwhile = abap_true.
+*        ec_error = abap_true.
+      ev_s_msgtext  = 'Внутренняя ошибка'(063).
+      MESSAGE e024(zmm2) WITH ev_s_msgtext '' '' '' INTO sy-msgli.
+      io_log->add_symsg( ).
+      RAISE EXCEPTION TYPE zcx_acc16_write_off.
+    ENDIF.
+
+    "-- Проверка допустимых значений на всплывающем экране
+    PERFORM scr_popup_strn_kor16_chkval
+      USING     et_output
+                lv_c_lifnr
+                lv_d_post_date
+                lv_d_doc_date
+                lv_c_strn_reas          " Причина сторно или обратной проводки    " ----   RT0K916270.RTKDEVSAP-33
+      CHANGING  lv_i_retcode
+                ls_message.
+    IF lv_i_retcode > ci_retval_w.
+      MESSAGE ID ls_message-msgid TYPE cc_msgty_i NUMBER ls_message-msgno
+        WITH ls_message-msgv1  ls_message-msgv2  ls_message-msgv3  ls_message-msgv4
+        DISPLAY LIKE ls_message-msgty.
+      io_log->add_symsg( ).
+      CONTINUE.
+    ENDIF.
+
+    lv_c_endwhile = abap_true.
+  ENDWHILE.
+
+* Проведение документов коррекции сальдо 16 сч
+*  DO 1 TIMES.
+*    CHECK ec_error = abap_false.
+*    CHECK lines( lt_output ) > 0.
+  PERFORM prep_strn_kor16_bapi_data_in
+    USING     lt_output
+              lv_c_lifnr              " Поставщик                               " ----   RT0K916335.RTKDEVSAP-33
+              lv_d_post_date          " Дата проводки с вспл.экрана             " ----   RT0K916270.RTKDEVSAP-33
+              lv_c_strn_reas          " Причина сторно или обратной проводки    " ----   RT0K916270.RTKDEVSAP-33
+    CHANGING  lt_bapi_accdocrevpost_if
+              lv_i_retcode
+              ls_message.
+
+  IF lv_i_retcode > ci_retval_w.
+*    ec_error = abap_true.
+*    _add_bapi_message:
+*      et_return ls_message-msgty ls_message-msgno ls_message-msgid
+*        ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+    io_log->add_symsg( ls_message ).
+    RAISE EXCEPTION TYPE zcx_acc16_write_off.
+  ENDIF.
+*  ENDDO.
+
+*  DO 1 TIMES.
+*    CHECK ec_error = abap_false.  " Call BAPI
+  LOOP AT lt_bapi_accdocrevpost_if ASSIGNING <fs_bapi_accdocrevpost_if>.
+*    CALL FUNCTION 'BAPI_ACC_DOCUMENT_REV_POST'
+*      EXPORTING
+*        reversal = <fs_bapi_accdocrevpost_if>-import-s_reversal
+*        bus_act  = <fs_bapi_accdocrevpost_if>-import-bus_act
+*      IMPORTING
+*        obj_type = <fs_bapi_accdocrevpost_if>-export-obj_type
+*        obj_key  = <fs_bapi_accdocrevpost_if>-export-obj_key
+*        obj_sys  = <fs_bapi_accdocrevpost_if>-export-obj_sys
+*      TABLES
+*        return   = <fs_bapi_accdocrevpost_if>-tables-t_return.
+    TRY .
+        go_bl->bapi_acc_document_rev_post(
+          EXPORTING
+            is_reversal = <fs_bapi_accdocrevpost_if>-import-s_reversal
+            iv_bus_act  = <fs_bapi_accdocrevpost_if>-import-bus_act
+          IMPORTING
+            obj_type    = <fs_bapi_accdocrevpost_if>-export-obj_type
+            obj_key     = <fs_bapi_accdocrevpost_if>-export-obj_key
+            obj_sys     = <fs_bapi_accdocrevpost_if>-export-obj_sys
+          CHANGING
+            ct_return   = <fs_bapi_accdocrevpost_if>-tables-t_return[] ).
+      CATCH zcx_acc16_write_off_bapi INTO lx_err_bapi.
+        <fs_bapi_accdocrevpost_if>-tables-t_return[] = lx_err_bapi->t_bapiret2[].
+    ENDTRY.
+*      CATCH zcx_acc16_write_off_bapi.    " Вызов BAPI
+
+    IF lines( <fs_bapi_accdocrevpost_if>-tables-t_return ) > 0.
+*      APPEND LINES OF <fs_bapi_accdocrevpost_if>-tables-t_return TO et_return.
+      io_log->add_bapiret2_tab( <fs_bapi_accdocrevpost_if>-tables-t_return[] ).
+      PERFORM define_bapi_result
+        USING    <fs_bapi_accdocrevpost_if>-tables-t_return[]
+        CHANGING lv_i_retcode
+                 ls_message.
+      IF lv_i_retcode > ci_retval_w.
+*        ec_error = abap_true.
+        io_log->add_symsg( ls_message ).
+        RAISE EXCEPTION TYPE zcx_acc16_write_off.
+      ELSE.
+        IF <fs_bapi_accdocrevpost_if>-export-obj_key IS INITIAL.
+*          ec_error = abap_true.
+          lv_s_msgtext = text-m15.  " Не удалось определить номер бух.документа сторно корректировки остатов 16сч.
+          ls_message = cl_uso_aw_su01=>utils_tfr_strtxt2msg( ).
+*          _add_bapi_message:
+*            et_return  ls_message-msgty ls_message-msgno ls_message-msgid
+*              ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+          io_log->add_symsg( ls_message ).
+          RAISE EXCEPTION TYPE zcx_acc16_write_off.
+        ELSE.
+          <fs_bapi_accdocrevpost_if>-belnr_kor16_st = <fs_bapi_accdocrevpost_if>-export-obj_key(10)  .      "  Номер сторно документа корректировки по 16сч.
+          <fs_bapi_accdocrevpost_if>-gjahr_kor16_st = <fs_bapi_accdocrevpost_if>-export-obj_key+14(4).      "  Год   сторно документа корректировки по 16сч.
+          <fs_bapi_accdocrevpost_if>-monat_kor16_st = lv_d_post_date+4(2).      "  месяц  сторно документа корректировки по 16сч.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+*  ENDDO.
+
+  DATA:
+    ls_db_corr16_key         TYPE           t_zmmcorr16_key.
+
+* Обновление БД: ZMMCORR16
+*  DO 1 TIMES.
+*    CHECK: ec_error = abap_false.
+  LOOP AT lt_bapi_accdocrevpost_if  INTO ls_bapi_accdocrevpost_if .
+    LOOP AT ls_bapi_accdocrevpost_if-t_db_corr16_key INTO ls_db_corr16_key.   " ----   RT0K916368.RTKDEVSAP-33
+      UPDATE zmmcorr16
+        SET   belnr_kor16_st = ls_bapi_accdocrevpost_if-belnr_kor16_st
+              gjahr_kor16_st = ls_bapi_accdocrevpost_if-gjahr_kor16_st
+              monat_kor16_st = ls_bapi_accdocrevpost_if-monat_kor16_st
+        WHERE bukrs = ls_db_corr16_key-bukrs AND
+              matnr = ls_db_corr16_key-matnr AND
+              spmon = ls_db_corr16_key-spmon AND
+              lifnr = ls_db_corr16_key-lifnr.
+
+      IF sy-subrc <> 0.
+        l_error = abap_true.       " Ошибка обновления данных в БД
+        ls_message-msgid = 'ZMM2'.
+        ls_message-msgty = 'E'   .
+        ls_message-msgno = '014' .        " Ошибка при сохранении в БД &1, (ключ &2&3) &4
+        ls_message-msgv1 = 'ZMMCORR16'.
+        ls_message-msgv2 = ls_db_corr16_key-bukrs  && ':' &&
+                           ls_db_corr16_key-matnr  && ':' &&
+                           ls_db_corr16_key-spmon.
+        ls_message-msgv3 = space.
+        ls_message-msgv4 = space.
+        MESSAGE e014(zmm2) WITH ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4 INTO sy-msgli.
+*          _add_bapi_message:
+*            et_return ls_message-msgty ls_message-msgno ls_message-msgid
+*              ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+        io_log->add_symsg( ).
+        EXIT.
+      ELSE.
+        DATA: wa_hist TYPE zmmcorr16_hist.
+        SELECT SINGLE * FROM zmmcorr16 INTO CORRESPONDING FIELDS OF wa_hist
+           WHERE bukrs = ls_db_corr16_key-bukrs AND
+                 matnr = ls_db_corr16_key-matnr AND
+                 spmon = ls_db_corr16_key-spmon AND
+                 lifnr = ls_db_corr16_key-lifnr.
+        IF sy-subrc = 0.
+          wa_hist-belnr_kor16_st = ls_bapi_accdocrevpost_if-belnr_kor16_st.
+          wa_hist-gjahr_kor16_st = ls_bapi_accdocrevpost_if-gjahr_kor16_st.
+          wa_hist-monat_kor16_st = ls_bapi_accdocrevpost_if-monat_kor16_st.
+          wa_hist-aenam          = sy-uname.
+          wa_hist-aedat          = sy-datum.
+          wa_hist-aetim          = sy-uzeit.
+          INSERT INTO zmmcorr16_hist VALUES wa_hist.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    IF l_error = abap_true.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+*  ENDDO.
+
+* Проведение документов коррекции сальдо 16 сч
+*  DO 1 TIMES.
+*  CHECK ic_commit = abap_true.
+  IF ic_commit = abap_true.
+    IF l_error = abap_false.  " Commit
+*      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+*        EXPORTING
+*          wait   = abap_true
+*        IMPORTING
+*          return = ls_return.
+      TRY .
+          ls_return = go_bl->bapi_commit( abap_true ).
+        CATCH zcx_acc16_write_off_bapi INTO lx_err_bapi.    " Вызов BAPI
+          READ TABLE lx_err_bapi->t_bapiret2[] INTO ls_return
+            WITH KEY type = 'E'.
+      ENDTRY.
+    ELSE.
+*      CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'
+*        IMPORTING
+*          return = ls_return.
+      IF ic_commit = abap_true.
+        ls_return = go_bl->bapi_rollback( ).
+      ENDIF.
+    ENDIF.
+
+    IF NOT ls_return IS INITIAL.
+      CASE ls_return-type.
+        WHEN cc_msgty_s OR cc_msgty_i.                          " Success
+*          ec_error = abap_false.
+        WHEN cc_msgty_w.                                        " Warning
+*          ec_error = abap_false.
+        WHEN OTHERS.                                            " Error  (A/ X/ E)
+          ROLLBACK WORK.
+*          ec_error = abap_true.
+          ls_message = cl_uso_aw_su01=>utils_tfr_bapiret2_2msg( ls_return ).
+          MESSAGE ID ls_message-msgid TYPE cc_msgty_e NUMBER ls_message-msgno
+            WITH ls_message-msgv1  ls_message-msgv2  ls_message-msgv3  ls_message-msgv4
+            DISPLAY LIKE ls_message-msgty.
+          io_log->add_symsg( ).
+      ENDCASE.
+*      _add_bapi_message:
+*        et_return ls_message-msgty ls_message-msgno ls_message-msgid
+*          ls_message-msgv1 ls_message-msgv2 ls_message-msgv3 ls_message-msgv4.
+      io_log->add_symsg( ls_message ).
+    ENDIF.
+  ENDIF.
+*  ENDDO.
+
+ENDFORM.                    " CANCEL_POSTING_KOR16_DOCS
+
+*&---------------------------------------------------------------------*
+*&      Form  PREP_STRN_KOR16_BAPI_DATa_IN
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM prep_strn_kor16_bapi_data_in
+  USING
+    it_output                TYPE           tt_output
+    ic_lifnr                 TYPE           c         ##NEEDED
+    id_post                  TYPE           d         ##NEEDED
+    ic_stgrd                 TYPE           c         ##NEEDED
+  CHANGING
+    et_bapi_if_data          TYPE           tt_bapi_accdocrevpost_if
+    ei_retcode               TYPE           i
+    es_message               TYPE           symsg.
+*
+* -----------------------------------------------
+  DATA:
+    ls_bapi_if_data          TYPE           t_bapi_accdocrevpost_if ,
+    ls_output                TYPE           t_output ,
+    lv_c_boole               TYPE           c.
+
+  TYPES:
+    BEGIN OF t_belnr,
+      belnr                  TYPE           bkpf-belnr,
+      gjahr                  TYPE           bkpf-gjahr,
+    END   OF t_belnr,
+    tt_belnr                 TYPE HASHED TABLE OF t_belnr
+                              WITH UNIQUE KEY belnr gjahr.
+  DATA:
+    lt_output_kor16st        TYPE           tt_output,
+    lt_belnr_kor16           TYPE           tt_belnr ,
+    ls_belnr_kor16           TYPE           t_belnr  .
+  DATA:
+    ls_db_corr16_key         TYPE           t_zmmcorr16_key.
+
+* -----------------------------------------------
+* Инициализация
+  CLEAR: ei_retcode, es_message, et_bapi_if_data.
+
+* Проверка наличия данных для создания документов коррекции сальдо 16сч.
+  DO 1 TIMES.
+    CHECK ei_retcode < ci_retval_e.
+    LOOP AT it_output INTO ls_output .
+      CLEAR: ls_bapi_if_data.
+
+      PERFORM chk_alvrow_cancel_allow_kor16
+        USING     ic_lifnr
+                  ls_output
+        CHANGING  lv_c_boole.
+      CHECK lv_c_boole = abap_true.
+
+      APPEND ls_output TO lt_output_kor16st.
+
+      CLEAR: ls_belnr_kor16.
+      ls_belnr_kor16-belnr = ls_output-belnr_kor16.
+      ls_belnr_kor16-gjahr = ls_output-gjahr_kor16.
+
+      INSERT ls_belnr_kor16 INTO TABLE lt_belnr_kor16.
+    ENDLOOP.
+
+    LOOP AT lt_belnr_kor16 INTO ls_belnr_kor16.
+      LOOP AT lt_output_kor16st INTO ls_output
+                                WHERE belnr_kor16 = ls_belnr_kor16-belnr AND
+                                      gjahr_kor16 = ls_belnr_kor16-gjahr.
+        AT FIRST  ##LOOP_AT_OK.
+
+* -- формирование параметров BAPI Importing
+          ls_bapi_if_data-import-s_reversal-obj_type   = 'BKPFF'    .
+          ls_bapi_if_data-import-s_reversal-obj_key_r  =
+          ls_bapi_if_data-import-s_reversal-obj_key    =
+            ls_belnr_kor16-belnr && '1000' && ls_belnr_kor16-gjahr.
+          ls_bapi_if_data-import-s_reversal-pstng_date = id_post    . " дата проводки - с дата на вспл.экране
+          ls_bapi_if_data-import-s_reversal-reason_rev = ic_stgrd   . " причина сторно - '03'(Факт.сторно в текущ.периоде)
+          ls_bapi_if_data-import-bus_act               = 'RFBU'     .
+        ENDAT.
+
+* -- формирование табл.ключей для ZMMCORR16
+        ls_db_corr16_key-bukrs      = ls_output-bukrs.
+        ls_db_corr16_key-matnr      = ls_output-matnr.
+        ls_db_corr16_key-spmon      = ls_output-spmon.
+        ls_db_corr16_key-lifnr      = ls_output-lifnr.
+        APPEND ls_db_corr16_key TO ls_bapi_if_data-t_db_corr16_key.
+
+        AT LAST  ##LOOP_AT_OK.
+          SORT ls_bapi_if_data-t_db_corr16_key BY bukrs matnr spmon.
+          DELETE ADJACENT DUPLICATES FROM ls_bapi_if_data-t_db_corr16_key
+            COMPARING bukrs matnr spmon lifnr.
+        ENDAT.
+      ENDLOOP.
+
+      APPEND ls_bapi_if_data TO et_bapi_if_data.
+    ENDLOOP.
+
+  ENDDO.
+
+ENDFORM.                    "PREP_STRN_KOR16_BAPI_DATa_IN
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_SINGLE_LIFNR
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM get_single_lifnr  ##CALLED
+  USING
+    it_output                TYPE           tt_output
+  CHANGING
+    ec_lifnr                 TYPE           c.
+*
+* -----------------------------------------------
+  DATA:
+    ls_output                TYPE           t_output.
+*
+* -----------------------------------------------
+  CLEAR: ec_lifnr.
+
+  READ TABLE it_output INTO ls_output INDEX 1.
+  IF sy-subrc <> 0 OR ls_output-lifnr IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  ec_lifnr = ls_output-lifnr.
+  LOOP AT it_output INTO ls_output
+                    WHERE lifnr <> ec_lifnr.
+    CLEAR ec_lifnr.
+    RETURN.
+  ENDLOOP.
+ENDFORM.                    " GET_SINGLE_LIFNR
+
+*&---------------------------------------------------------------------*
+*&      Form  GET_LAST_DAY_OF_PERIOD
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM get_last_day_of_period USING     id_spmon     TYPE spmon
+                            CHANGING  ed_last_date TYPE d.
+* -----------------------------------------------
+  DATA:
+    lv_d_1st_date TYPE d.
+
+
+  CLEAR: ed_last_date.
+
+  IF id_spmon IS INITIAL.
+    RETURN.
+  ENDIF.
+
+* -- Определение последненго дня месяца в периоде
+  lv_d_1st_date = id_spmon && '01'.
+  CALL FUNCTION 'LAST_DAY_OF_MONTHS'
+    EXPORTING
+      day_in            = lv_d_1st_date
+    IMPORTING
+      last_day_of_month = ed_last_date
+    EXCEPTIONS
+      OTHERS            = 2.
+  IF sy-subrc <> 0.
+    MESSAGE e401(5d) WITH lv_d_1st_date DISPLAY LIKE cc_msgty_i.
+  ENDIF.
+ENDFORM.                    " GET_LAST_DAY_OF_PERIOD
+
+*&---------------------------------------------------------------------*
+*&      Form  SCR_POPUP_STRN_KOR16_CHKVAL
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+FORM scr_popup_strn_kor16_chkval
+  USING
+    it_output                TYPE           tt_output
+    ic_lifnr                 TYPE           c         ##NEEDED
+    id_post                  TYPE           d         ##NEEDED
+    id_doc                   TYPE           d         ##NEEDED
+    ic_stgrd                 TYPE           c         ##NEEDED    " ----   RT0K916270.RTKDEVSAP-33
+  CHANGING
+    ei_retcode               TYPE           i
+    es_message               TYPE           symsg.
+*
+* -----------------------------------------------
+  TYPES:
+    BEGIN OF t_bkpf_sc,
+      bukrs                  TYPE           bkpf-bukrs,
+      belnr                  TYPE           bkpf-belnr,
+      gjahr                  TYPE           bkpf-gjahr,
+    END   OF t_bkpf_sc,
+    tt_bkpf_sc               TYPE HASHED TABLE OF t_bkpf_sc
+                              WITH UNIQUE KEY bukrs belnr gjahr,
+    BEGIN OF t_bkpf_sel.
+  INCLUDE                    TYPE           t_bkpf_sc.
+  TYPES:
+      bldat                  TYPE           bkpf-bldat,   " ----   RT0K916362.RTKDEVSAP-33
+      budat                  TYPE           bkpf-budat,
+    END   OF t_bkpf_sel,
+    tt_bkpf_sel              TYPE STANDARD TABLE OF t_bkpf_sel
+                                WITH NON-UNIQUE KEY primary_key COMPONENTS bukrs belnr gjahr.
+* ----
+  DATA:
+    lv_s_msgtext             TYPE           string    ,
+    lv_c_date_doc(10)        TYPE           c.
+  DATA:
+    ls_output                TYPE           t_output   ,
+    ls_bkpf_sc               TYPE           t_bkpf_sc  ,
+    lt_bkpf_sc               TYPE           tt_bkpf_sc ,
+    ls_bkpf_sel              TYPE           t_bkpf_sel ,
+    lt_bkpf_sel              TYPE           tt_bkpf_sel.
+  DATA row_id TYPE string.
+*
+* -----------------------------------------------
+* Инициализация
+  CLEAR: ei_retcode, es_message.
+  WRITE id_doc TO lv_c_date_doc.
+
+* Проверка наличия введеного Поставщика в строках ALV
+  DO 1 TIMES.
+    CHECK ei_retcode < ci_retval_e.
+    LOOP AT it_output INTO ls_output
+      WHERE  lifnr            = ic_lifnr      AND
+             stock_16_fin_kor <> 0            AND
+         NOT belnr_kor16      IS INITIAL      AND
+         NOT gjahr_kor16      IS INITIAL      AND
+             status           = icon_complete.
+* -- критерии выборки для даты проводки сторнируемого документа ls_bkpf_sc
+      CLEAR: ls_bkpf_sc.
+      ls_bkpf_sc-bukrs = ls_output-bukrs      .
+      ls_bkpf_sc-belnr = ls_output-belnr_kor16.
+      ls_bkpf_sc-gjahr = ls_output-gjahr_kor16.
+      INSERT ls_bkpf_sc INTO TABLE lt_bkpf_sc.
+
+* -- критерии выборки ...
+*     <...>
+    ENDLOOP.
+    IF sy-subrc <> 0.
+      IF ei_retcode < ci_retval_e. ei_retcode = ci_retval_e. ENDIF.
+      row_id = |{ ls_output-spmon+4(2) }.{ ls_output-spmon(4) }/{ ls_output-lifnr }/{ ls_output-matnr }|.
+      MESSAGE e014(zmm_acc16_write_off) WITH row_id INTO sy-msgli.
+      EXIT.
+    ENDIF.
+  ENDDO.
+
+* Проверка даты проводки сторнируемого документа введеного BUDAT в BKPF
+  DO 1 TIMES.
+    CHECK ei_retcode < ci_retval_e.
+    CHECK lines( lt_bkpf_sc ) > 0.
+    SELECT bukrs belnr gjahr
+           bldat budat
+      INTO TABLE lt_bkpf_sel
+      FROM bkpf
+      FOR ALL ENTRIES IN lt_bkpf_sc
+      WHERE bukrs = lt_bkpf_sc-bukrs AND
+            belnr = lt_bkpf_sc-belnr AND
+            gjahr = lt_bkpf_sc-gjahr.
+    IF sy-subrc <> 0.
+      IF ei_retcode < ci_retval_e. ei_retcode = ci_retval_e. ENDIF.
+      CONCATENATE:
+        'Для выбранных фин.документов'(086) 'отсутствуют записи в БД'(087) '(табл.BKPF)'(088)
+          INTO lv_s_msgtext SEPARATED BY space.
+      cl_message_helper=>set_msg_vars_for_clike( lv_s_msgtext ).  " Set message to SY-MSG*
+      MOVE-CORRESPONDING sy TO es_message.
+      EXIT.
+    ENDIF.
+
+    DELETE lt_bkpf_sel WHERE bldat NE id_doc.
+
+    LOOP AT it_output INTO ls_output
+      WHERE  lifnr            =  ic_lifnr     AND
+             stock_16_fin_kor <> 0            AND
+         NOT belnr_kor16      IS INITIAL      AND
+         NOT gjahr_kor16      IS INITIAL      AND
+             status           = icon_complete.
+
+      READ TABLE lt_bkpf_sel INTO ls_bkpf_sel
+        WITH KEY  bukrs = ls_output-bukrs
+                  belnr = ls_output-belnr_kor16
+                  gjahr = ls_output-gjahr_kor16
+                  bldat = id_doc.
+      IF sy-subrc = 0.
+        EXIT.                         " проверка Даты документа - ОК!
+      ELSE.
+        IF ei_retcode < ci_retval_e. ei_retcode = ci_retval_e. ENDIF.
+        CONCATENATE:
+          'Для выбранных фин.документов'(086) 'отсутствуют записи в БД'(087)
+          'с датой документа'(089) lv_c_date_doc '(табл.BKPF)'(088)
+            INTO lv_s_msgtext SEPARATED BY space.
+        cl_message_helper=>set_msg_vars_for_clike( lv_s_msgtext ).  " Set message to SY-MSG*
+        MOVE-CORRESPONDING sy TO es_message.
+      ENDIF.
+    ENDLOOP.
+  ENDDO.
+
+ENDFORM.                                  " SCR_POPUP_STRN_KOR16_CHKVAL
+
+*&---------------------------------------------------------------------*
+*&      Form  CHK4SINGLE_SUPPLIER
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  Использвание глобальных переменных
+*  - so_lifnr
+*  - <...>
+*
+*  Измененение глобальных переменных
+*  - <...>
+*
+* -----------------------------------------------
+FORM chk4single_supplier
+  CHANGING
+    ec_lifnr                 TYPE           c.
+*
+* -----------------------------------------------
+  FIELD-SYMBOLS
+    <ls_lifnr> TYPE lfa1-lifnr.
+
+  DATA:
+    lt_lifnr TYPE STANDARD TABLE OF lfa1-lifnr.
+*
+* -----------------------------------------------
+  CLEAR: ec_lifnr.
+
+  IF so_lifnr[] IS INITIAL OR
+     so_matnr[] IS NOT INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT lifnr INTO TABLE lt_lifnr
+    FROM  lfa1
+    WHERE lifnr IN so_lifnr.
+
+  IF lines( lt_lifnr ) = 1.
+    READ TABLE lt_lifnr ASSIGNING <ls_lifnr> INDEX 1.
+    ec_lifnr = <ls_lifnr>.
+  ENDIF.
+
+ENDFORM.                    " CHK4SINGLE_SUPPLIER
+
+*&---------------------------------------------------------------------*
+*&      Form  chk_alvrow_post_allow_kor16
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  Использвание глобальных переменных
+*  - <...>
+*
+*  Измененение глобальных переменных
+*  - <...>
+*
+* -----------------------------------------------
+FORM chk_alvrow_post_allow_kor16
+  USING
+    ic_lifnr                 TYPE           c
+    is_output                TYPE           t_output
+  CHANGING
+    ec_alow                  TYPE           c.
+*
+* -----------------------------------------------
+*
+* -----------------------------------------------
+  CLEAR: ec_alow.
+
+  DO 1 TIMES.
+    CHECK:
+      NOT ic_lifnr IS INITIAL                            ,
+          is_output-status            = icon_complete AND
+          is_output-lifnr             = ic_lifnr      AND
+          is_output-stock_16_fin_kor <> 0             AND
+      ( (     is_output-belnr_kor16    IS INITIAL AND       " док.корруктировки 16сч. - Не создавался
+              is_output-gjahr_kor16    IS INITIAL )  OR
+        ( NOT is_output-belnr_kor16    IS INITIAL AND       " док.корруктировки 16сч. - был создаван и сторнирован
+          NOT is_output-gjahr_kor16    IS INITIAL AND
+          NOT is_output-belnr_kor16_st IS INITIAL AND
+          NOT is_output-gjahr_kor16_st IS INITIAL ) ).
+    ec_alow = abap_true.
+  ENDDO.
+
+ENDFORM.                    "chk_alvrow_post_allow_kor16
+
+*&---------------------------------------------------------------------*
+*&      Form  chk_alvrow_cancel_allow_kor16
+*&---------------------------------------------------------------------*
+*       text
+*----------------------------------------------------------------------*
+*  Использвание глобальных переменных
+*  - <...>
+*
+*  Измененение глобальных переменных
+*  - <...>
+*
+* -----------------------------------------------
+FORM chk_alvrow_cancel_allow_kor16
+  USING
+    ic_lifnr                 TYPE           c
+    is_output                TYPE           t_output
+  CHANGING
+    ec_alow                  TYPE           c.
+*
+* -----------------------------------------------
+*
+* -----------------------------------------------
+  CLEAR: ec_alow.
+
+  DO 1 TIMES.
+    CHECK:
+      NOT ic_lifnr IS INITIAL ,
+          is_output-status           = icon_complete AND
+          is_output-lifnr            = ic_lifnr      AND
+          is_output-stock_16_fin_kor <> 0            AND
+        ( NOT is_output-belnr_kor16    IS INITIAL AND       " док.корруктировки 16сч. - был создаван и НЕ сторнирован
+          NOT is_output-gjahr_kor16    IS INITIAL AND
+              is_output-belnr_kor16_st IS INITIAL AND
+              is_output-gjahr_kor16_st IS INITIAL ) .
+    ec_alow = abap_true.
+  ENDDO.
+
+ENDFORM.                    "chk_alvrow_cancel_allow_kor16
+
+*&---------------------------------------------------------------------*
+*&      Form  PREP_KOR16_KEY_DB_NOPOST
+*&---------------------------------------------------------------------*
+*  подпрограмма подготовки ключей для обновления данных БД ZMMCORR16   *
+*  в рамках доработки:                                                 *
+* ' RTKDEVSAP-33 (http://jiraf.tsretail.ru/browse/RTKDEVSAP-33)        *
+*    <...>                                                             *
+*   C. при проведении корректирующей проводки (KORR_16)...             *
+*     <...>                                                            *
+*   ОСТАВШИЕСЯ записи ALV данные в полях: STOCK_16_FIN_KOR, BELNR_KOR16,*
+*   GJAHR_KOR16, BELNR_KOR16_ST, GJAHR_KOR16_ST - очищаются            *
+*     <...> '                                                          *
+*----------------------------------------------------------------------*
+FORM prep_kor16_key_db_nopost
+  USING
+    it_output                TYPE           tt_output
+    ic_bukrs                 TYPE           bukrs
+    id_period                TYPE           spmon
+    ic_lifnr                 TYPE           c
+  CHANGING
+    et_key_db                TYPE           tt_zmmcorr16_key.
+*
+* -----------------------------------------------
+  DATA:
+    ls_output                TYPE           t_output        ,
+    ls_key_db                TYPE           t_zmmcorr16_key,
+    lv_c_boole               TYPE           c               .
+*
+* -----------------------------------------------
+  CLEAR: et_key_db.
+
+  LOOP AT it_output INTO ls_output.
+* -- Фильтр для НЕ обрабатываемых позиций
+    PERFORM chk_alvrow_post_allow_kor16
+      USING     ic_lifnr
+                ls_output
+      CHANGING  lv_c_boole.
+    CHECK lv_c_boole = abap_false.                      " для строк ALV НЕ попавших в обработку
+
+* -- Формирование ключей записей обновления БД: ZMMCORR16
+    CLEAR ls_key_db.
+    MOVE-CORRESPONDING ls_output TO ls_key_db.          " MATNR, ...
+    ls_key_db-bukrs = ic_bukrs.
+    ls_key_db-spmon = id_period.
+    ls_key_db-lifnr = ic_lifnr .
+    APPEND ls_key_db TO et_key_db.
+  ENDLOOP.
+
+ENDFORM.                    " PREP_KOR16_KEY_DB_NOPOST
+
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+FORM chk_movtypes
+  USING
+    ic_out_type              TYPE           i        " types output: 0- no_output/ 1- alv/ 2- write report
+  CHANGING
+    ec_start_allow_flg       TYPE           c
+    es_ctrl_alv              TYPE           t_chkmvty_ctrl_alv
+    et_data_alv              TYPE           tt_chkmvty_data_alv.
+
+* -----------------------------------------------
+*  Using global data:
+*   - ...
+*  Changing global data:
+*   - ...
+* -----------------------------------------------
+  TYPES:
+    tt_t156_sel              TYPE HASHED TABLE OF   t_bwart_shkzg
+                              WITH UNIQUE KEY bwart,
+    tt_zmvtp_rasp16_sel      TYPE HASHED TABLE OF   t_bwart_shkzg
+                              WITH UNIQUE KEY bwart  shkzg.
+  DATA:
+    ls_t156_sel               TYPE           t_bwart_shkzg      ,
+    lt_t156_sel               TYPE           tt_t156_sel        ,
+*    ls_mvtp_rasp16_sel        TYPE           t_bwart_shkzg      ,
+    lt_mvtp_rasp16_sel        TYPE           tt_zmvtp_rasp16_sel,
+    ls_data_diff              TYPE           t_bwart_shkzg      ,
+    lt_data_diff              TYPE           tt_bwart_shkzg     .
+  DATA:
+    lv_s_msgtext              TYPE           string ,
+    lv_c_title                TYPE           string ,
+    lv_c_answer(1)            TYPE           c      ,
+    lv_c_row_not_found        TYPE           boole_d,
+    lv_i_out_type             TYPE           i      ,
+    lv_i_rows                 TYPE           i      ,
+    lv_c_rows(14)             TYPE           c      .
+
+* -----------------------------------------------
+* Initialize
+  CLEAR: ec_start_allow_flg.
+  CLEAR:  es_ctrl_alv, et_data_alv.
+
+  lv_i_out_type = ic_out_type.
+
+* Select from T156 (whole)
+  SELECT bwart  shkzg
+    FROM t156
+    INTO TABLE lt_t156_sel.
+
+* Select from ZMM_MVTP_RASP16
+  DO 1 TIMES.
+    IF lines( lt_t156_sel ) = 0.              " No start allowed
+      lv_s_msgtext = 'Таблица мастер-данных T156 не содержит записей'(103).
+      EXIT.
+    ENDIF.
+
+    SELECT bwart  shkzg
+      FROM zmm_mvtp_rasp16
+      INTO TABLE lt_mvtp_rasp16_sel
+      FOR ALL ENTRIES IN lt_t156_sel
+      WHERE bwart = lt_t156_sel-bwart AND
+            shkzg = lt_t156_sel-shkzg.
+    IF sy-subrc <> 0.                       " No start allowed
+      lv_s_msgtext = 'Контрольная таблица ZMM_MVTP_RASP16 не содержит соответствующих записей для T156'(106).
+      EXIT.
+    ENDIF.
+
+*  Check that all records of T156 are existing in ZMM_MVTP_RASP16
+    LOOP AT lt_t156_sel INTO ls_t156_sel.
+      READ TABLE lt_mvtp_rasp16_sel TRANSPORTING NO FIELDS
+        WITH TABLE KEY bwart = ls_t156_sel-bwart
+                       shkzg = ls_t156_sel-shkzg.
+      CHECK sy-subrc <> 0.
+      lv_c_row_not_found = abap_true.
+      MOVE-CORRESPONDING ls_t156_sel TO ls_data_diff.
+      APPEND ls_data_diff TO lt_data_diff.
+    ENDLOOP.
+    CASE lv_c_row_not_found.
+      WHEN abap_false.
+        ec_start_allow_flg = abap_true.
+      WHEN OTHERS.
+        IF lines( lt_data_diff ) > 0.
+          lv_i_rows = lines( lt_data_diff ).
+          WRITE lv_i_rows TO lv_c_rows. CONDENSE lv_c_rows.
+        ELSE.
+          lv_c_rows = '0'.
+        ENDIF.
+        CONCATENATE:
+        lv_c_rows   'строк отсутствует в таблице T156.'(113)
+        'Дальнейшее выполнение программы невозможно.'(111) 'Вывести расхождения?'(112)
+          INTO lv_s_msgtext SEPARATED BY space.
+    ENDCASE.
+  ENDDO.
+
+  CASE ec_start_allow_flg.
+    WHEN abap_true.                         " Start allowed
+* -- Display message
+      IF NOT lv_s_msgtext IS INITIAL.
+        MESSAGE lv_s_msgtext  TYPE 'I' DISPLAY LIKE 'S'.
+      ENDIF.
+      RETURN.
+
+    WHEN OTHERS.                            " No start allowed
+* -- Display message
+      IF NOT lv_s_msgtext IS INITIAL.
+        CASE  lv_c_row_not_found.
+          WHEN abap_true.                   " POPUP_TO_CONFIRM
+            CALL FUNCTION 'POPUP_TO_CONFIRM'
+              EXPORTING
+                titlebar              = lv_c_title
+                text_question         = lv_s_msgtext
+                text_button_1         = 'Да'(052)
+                text_button_2         = 'Нет'(053)
+                default_button        = '1'
+                display_cancel_button = ''
+                popup_type            = 'ICON_MESSAGE_CRITICAL'
+              IMPORTING
+                answer                = lv_c_answer
+              EXCEPTIONS
+                OTHERS                = 0.
+            IF lv_c_answer <> '1'. lv_i_out_type = 99. ENDIF. " No output ALV-grid
+
+          WHEN OTHERS.                      " MESSAGE type 'I'
+            MESSAGE lv_s_msgtext  TYPE 'I' DISPLAY LIKE 'E'.
+        ENDCASE.
+      ENDIF.
+
+* -- Output result
+      CASE lv_i_out_type.
+        WHEN 1.                   " ALV-Grid
+          DO 1 TIMES.
+            PERFORM start_alv_movty_diff
+              USING     lt_data_diff
+              CHANGING  es_ctrl_alv
+                        et_data_alv.
+          ENDDO.
+        WHEN 2.                   " Write report
+          MESSAGE 'Данный режим временно не поддерживается'(104)
+            TYPE 'I' DISPLAY LIKE 'E'.
+          RETURN.
+
+        WHEN OTHERS.              " No output
+*          <nothing to do>
+      ENDCASE.
+  ENDCASE.
+
+ENDFORM.                    "chk_movtypes
+
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+FORM start_alv_movty_diff
+  USING
+    it_data_sql              TYPE           tt_bwart_shkzg
+  CHANGING
+    es_ctrl_alv              TYPE           t_chkmvty_ctrl_alv
+    et_data_alv              TYPE           tt_chkmvty_data_alv.
+*
+* -----------------------------------------------
+*  Using global data:
+*   - ...
+*  Changing global data:
+*   - ...
+* -----------------------------------------------
+  DATA:
+     lv_c_title              TYPE           lvc_title,
+     lv_i_rows               TYPE           int4,
+     lv_c_rows(14)           TYPE           c.
+*
+* -----------------------------------------------
+  DO 1 TIMES.
+    CHECK lines( it_data_sql ) > 0.
+
+* Initialize
+    CLEAR:  es_ctrl_alv, et_data_alv.
+
+*  Prepare Data
+    PERFORM conv_chkmvty_data_sql2alv
+      USING     it_data_sql
+      CHANGING  et_data_alv.
+
+*  Prepare Control
+* -- Layout
+    es_ctrl_alv-s_layo-zebra      = abap_true.
+    es_ctrl_alv-s_layo-info_fname = 'ROWCOLOR'.
+    es_ctrl_alv-s_layo-ctab_fname = 'CELLCOLORS'.  " Cell coloring
+    es_ctrl_alv-s_layo-stylefname = 'CELLSTYLES'.
+    es_ctrl_alv-s_layo-box_fname  = 'SEL'.
+    es_ctrl_alv-s_layo-cwidth_opt = abap_true.
+    es_ctrl_alv-s_layo-smalltitle = abap_true.
+
+* -- Fieldcatalog
+    es_ctrl_alv-fcat_tabname = 'ZMM_MVTP_RASP16'.
+    PERFORM alv_chkmvty_prepfcat
+      USING     es_ctrl_alv-fcat_tabname
+      CHANGING  es_ctrl_alv-t_fcat.
+
+* -- title
+    lv_i_rows = lines( et_data_alv ).
+    IF lv_i_rows > 0.
+      WRITE lv_i_rows TO lv_c_rows. CONDENSE lv_c_rows.
+    ENDIF.
+    CONCATENATE:
+      lv_c_rows 'строк для ZMM_MVTP_RASP16'(110)
+        INTO lv_c_title SEPARATED BY space.
+
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY_LVC'
+      EXPORTING
+        i_callback_program       = sy-cprog                        " Name of the calling program
+        i_callback_pf_status_set = 'ALV_CLBK_CHKMVTY_SET_STATUS'   " Set EXIT routine to status
+        i_callback_user_command  = 'ALV_CLBK_CHKMVTY_UCOMM'        " EXIT routine for command handling
+        i_grid_title             = lv_c_title                     " Control title
+        is_layout_lvc            = es_ctrl_alv-s_layo               " List Layout Specifications
+        it_fieldcat_lvc          = es_ctrl_alv-t_fcat               " Field Catalog with Field Descriptions
+        i_save                   = es_ctrl_alv-save                " Variants Can be Saved
+        i_screen_start_column    = 5                               " Coordinates for list in dialog box
+        i_screen_start_line      = 1                               " Coordinates for list in dialog box
+        i_screen_end_column      = 35                              " Coordinates for list in dialog box
+        i_screen_end_line        = 30                              " Coordinates for list in dialog box
+      TABLES
+        t_outtab                 = et_data_alv                  " Table with data to be displayed
+      EXCEPTIONS
+        OTHERS                   = 0.
+  ENDDO.
+ENDFORM.                    "start_alv_movty_diff
+
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+FORM alv_clbk_chkmvty_ucomm  ##CALLED
+   USING
+     ic_ucomm                TYPE           c
+     rs_selfield             TYPE           slis_selfield ##NEEDED.
+*
+* -----------------------------------------------
+*  Using global data:
+*   - ...
+*  Changing global data:
+*   - ...
+* -----------------------------------------------
+  CASE ic_ucomm.
+    WHEN  '&IC1'.             " 'Double-click' от Cell
+*     <...>
+    WHEN OTHERS.
+*     <...>
+  ENDCASE.
+ENDFORM.                    "start_alv_movty_diff
+
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+FORM alv_clbk_chkmvty_set_status   ##CALLED
+  USING
+    extab                    TYPE           slis_t_extab ##NEEDED.
+*
+* -----------------------------------------------
+*  Using global data:
+*   - gs_chkmvty_ctrl_alv-r_alvgrid
+*   - ...
+*  Changing global data:
+*   - ...
+* -----------------------------------------------
+  DATA:
+    lt_pfsta_excl            TYPE STANDARD TABLE OF   syucomm
+                              WITH NON-UNIQUE KEY primary_key COMPONENTS table_line.
+
+* -----------------------------------------------
+* set PF-STATUS
+  DO 2 TIMES.
+    CASE sy-index.
+      WHEN 1.
+        APPEND '&EB9' TO lt_pfsta_excl.
+      WHEN 2.
+        APPEND '&ELP' TO lt_pfsta_excl.
+    ENDCASE.
+  ENDDO.
+  SET PF-STATUS 'STDPOPBX_FS_LIGHT' EXCLUDING lt_pfsta_excl.
+
+*  get ALV-object
+  IF gs_chkmvty_ctrl_alv-r_alvgrid IS INITIAL.
+    CALL FUNCTION 'GET_GLOBALS_FROM_SLVC_FULLSCR'
+      IMPORTING
+        e_grid = gs_chkmvty_ctrl_alv-r_alvgrid.
+  ENDIF.
+
+  IF NOT gs_chkmvty_ctrl_alv-r_alvgrid IS INITIAL.
+    gs_chkmvty_ctrl_alv-r_alvgrid->check_changed_data( ).
+  ENDIF.
+ENDFORM.                    "ALV_CLBK_CHKMVTY_SET_STATUS
+
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+FORM alv_clbk_top_of_page  ##CALLED ##NEEDED.
+*
+* -----------------------------------------------
+*  Using global data:
+*   - ...
+*  Changing global data:
+*   - ...
+* -----------------------------------------------
+* <...>
+
+ENDFORM.                    "ALV_CLBK_TOP_OF_PAGE
+
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+FORM alv_chkmvty_prepfcat
+  USING
+    ic_str_name             TYPE           c
+  CHANGING
+    et_fcat                 TYPE           lvc_t_fcat.
+*
+* -----------------------------------------------
+*  Using global data:
+*   - ...
+*  Changing global data:
+*   - ...
+* -----------------------------------------------
+  DATA:
+    lr_oref                  TYPE REF TO    cx_root   ,
+    ls_text                  TYPE           string    ,
+    lv_c_tabname             TYPE           tabname   ,
+    lt_fcat                  TYPE           lvc_t_fcat.
+
+  FIELD-SYMBOLS:
+    <fs_fcat>                TYPE           lvc_s_fcat.
+*
+* -----------------------------------------------
+  CLEAR: et_fcat.
+  lv_c_tabname = ic_str_name.
+
+  TRY.
+      CALL FUNCTION 'LVC_FIELDCATALOG_MERGE'
+        EXPORTING
+          i_buffer_active    = ''
+          i_structure_name   = lv_c_tabname
+          i_bypassing_buffer = abap_true
+        CHANGING
+          ct_fieldcat        = lt_fcat
+        EXCEPTIONS
+          OTHERS             = 0.
+    CATCH cx_sy_dyn_call_illegal_type INTO lr_oref.
+      ls_text = lr_oref->get_text( ).
+      MESSAGE ls_text TYPE cc_msgty_i DISPLAY LIKE cc_msgty_e.
+      RETURN.
+  ENDTRY.
+
+  LOOP AT lt_fcat ASSIGNING <fs_fcat>.
+    CASE <fs_fcat>-fieldname.
+      WHEN 'BWART'.
+        <fs_fcat>-col_pos = 1.
+        <fs_fcat>-key     = abap_true.
+
+      WHEN 'SHKZG'.
+        <fs_fcat>-col_pos = 2.
+        <fs_fcat>-key     = abap_false.
+
+      WHEN OTHERS.
+        <fs_fcat>-no_out = abap_true.
+    ENDCASE.
+  ENDLOOP.
+
+* Return
+  et_fcat = lt_fcat.
+
+ENDFORM.                    "alv_chkmvty_prepfcat
+
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+FORM conv_chkmvty_data_sql2alv
+  USING
+    it_data_sql              TYPE           tt_bwart_shkzg
+  CHANGING
+    et_data_alv              TYPE           tt_chkmvty_data_alv.
+* -----------------------------------------------
+*  Using global data:
+*   - ...
+*  Changing global data:
+*   - ...
+* -----------------------------------------------
+  DATA:
+    ls_data_sql              TYPE           t_bwart_shkzg.
+
+  FIELD-SYMBOLS:
+    <ls_data_sql>            TYPE           t_chkmvty_data_alv.
+*
+* -----------------------------------------------
+  CLEAR et_data_alv.
+
+  LOOP AT it_data_sql INTO ls_data_sql.
+    APPEND INITIAL LINE TO et_data_alv ASSIGNING <ls_data_sql>.
+    MOVE-CORRESPONDING ls_data_sql TO <ls_data_sql>.
+  ENDLOOP.
+ENDFORM.                    "conv_chkmvty_data_sql2alv
+
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+FORM init_fkey.
+* -----------------------------------------------
+*  Using global data:
+*   - ...
+*  Changing global data:
+*   - sscrfields
+*   - ...
+* -----------------------------------------------
+  DATA:
+    ls_fkeys                   TYPE           smp_dyntxt.
+*
+* -----------------------------------------------
+* Function Key 1 (FC01)
+  ls_fkeys-icon_id       = icon_moving_data_act.
+  ls_fkeys-quickinfo     = 'Проверка видов движения'(107).
+  ls_fkeys-icon_text     = 'ПровВидДв'(108).
+  sscrfields-functxt_01 = ls_fkeys.
+
+* Function Key 2 (FC02)
+*  <...>
+
+* Function Key 3 (FC03)
+*  <...>
+
+* Function Key 4 (FC04)
+*  <...>
+
+ENDFORM.                    "init_fkey
+
+*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
+FORM chg_stndt_sspfsta
+  USING
+    ic_start_allow_flg       TYPE                c.
+* -----------------------------------------------
+*  Using global data:
+*   - ...
+*  Changing global data:
+*   - ...
+* -----------------------------------------------
+  DATA:
+   lt_excl_fcode             TYPE STANDARD TABLE OF   syucomm   ,
+   ls_fkeys                  TYPE                     rseul_keys,
+   lt_fkeys                  TYPE STANDARD TABLE OF   rseul_keys.
+*
+* -----------------------------------------------
+  CALL FUNCTION 'RS_CUA_GET_STATUS'
+    EXPORTING
+*     LANGUAGE = ' '
+      program  = 'RSSYSTDB'  "
+      status   = sy-pfkey    " %_00 - current PF-STATUS
+    TABLES
+      fkeys    = lt_fkeys
+    EXCEPTIONS
+      OTHERS   = 0.
+
+  CASE ic_start_allow_flg.
+    WHEN abap_false.            " проверка не проведена или отрицательный результат
+      DO 1 TIMES.
+        READ TABLE lt_fkeys INTO ls_fkeys
+          WITH KEY code = 'ONLI'.           " F8 = Run report
+        CHECK sy-subrc = 0.
+        APPEND 'ONLI' TO lt_excl_fcode.     " Remove button F8 from statdard PF-STATUS %_00 ( pgm 'RSSYSTDB')
+      ENDDO.
+
+    WHEN OTHERS.                " 'X' - проверка пройдена
+*     <... do_nothing>
+  ENDCASE.
+
+  CALL FUNCTION 'RS_SET_SELSCREEN_STATUS'
+    EXPORTING
+      p_status  = sy-pfkey
+    TABLES
+      p_exclude = lt_excl_fcode.
+
+ENDFORM.                    "chg_stndt_sspfsta
